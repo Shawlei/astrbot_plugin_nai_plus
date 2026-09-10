@@ -405,6 +405,70 @@ class Nai2ApiPlugin(Star):
         await self.client.close()
         await self.imgr.close()
 
+    # ------------------------------------------------------------------
+    # OpenAI 兼容接口的「选预设 → 自动填地址」与「拉取模型列表」
+    #
+    # 这两个都挂在 _conf_schema.json 的字段上（provider_default / options 回调），
+    # AstrBot 会在渲染配置面板时按字段名来找同名方法，所以方法名必须叫
+    # translate_openai_prefill / translate_openai_model，不能改。
+    # ------------------------------------------------------------------
+    _OPENAI_PRESETS = {
+        "openai": ("https://api.openai.com/v1", "gpt-4o-mini"),
+        "dashscope": (
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "qwen-plus",
+        ),
+        "deepseek": ("https://api.deepseek.com/v1", "deepseek-chat"),
+        "siliconflow": (
+            "https://api.siliconflow.cn/v1",
+            "Qwen/Qwen2.5-7B-Instruct",
+        ),
+        "moonshot": ("https://api.moonshot.cn/v1", "moonshot-v1-8k"),
+        "zhipu": ("https://open.bigmodel.cn/api/paas/v4", "glm-4-flash"),
+        "openrouter": ("https://openrouter.ai/api/v1", "openai/gpt-4o-mini"),
+        "ollama": ("http://127.0.0.1:11434/v1", "qwen2.5:7b"),
+    }
+
+    def translate_openai_prefill(self, value: str = ""):
+        """用户在下拉框里选了预设接口后，返回要自动填入的默认值。
+
+        返回值会按字段名映射到 base_url / model 两个配置项上，
+        用户在面板上看到的地址和模型就自动填好了，key 还是要自己填。
+        """
+        preset = self._OPENAI_PRESETS.get(str(value or "").strip().lower())
+        if not preset:
+            return {}
+        base_url, model = preset
+        return {
+            "translate_openai_base_url": base_url,
+            "translate_openai_model": model,
+        }
+
+    def translate_openai_model(self, value: str = "", **kwargs):
+        """「直译模型」字段的下拉选项来源：实时拉取接口的 /models。
+
+        拉不到就返回空列表，配置面板会退化成普通输入框，用户手填模型名即可。
+        """
+        config = kwargs.get("config") or self.config or {}
+        base_url = str(config.get("translate_openai_base_url", "") or "").strip()
+        api_key = str(config.get("translate_openai_api_key", "") or "").strip()
+        if not base_url:
+            return []
+
+        from .core.translate_manager import fetch_openai_models
+
+        try:
+            models = fetch_openai_models(base_url, api_key, timeout=10.0)
+        except Exception as e:  # 拉取失败不该阻断配置面板渲染
+            logger.warning("[Nai2API] 拉取直译模型列表失败: %s", e)
+            return []
+
+        # 把当前已经填的值也带上，避免保存后选项列表里没有自己导致显示空白
+        current = str(config.get("translate_openai_model", "") or "").strip()
+        if current and current not in models:
+            models.insert(0, current)
+        return models
+
     def _resolve_artist(self, preset_name: str | None, artist: str | None) -> str | None:
         """解析 artist：预设优先，--artist 覆盖预设"""
         if artist is not None:

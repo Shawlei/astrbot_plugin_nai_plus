@@ -204,11 +204,54 @@
     "default": [],
     "_special": "select_providers"
   },
-  "translate_openai_models": {
-    "description": "翻译模型（OpenAI 模式）",
-    "hint": "每个模型一行，格式：base_url|api_key|model，按顺序轮询，前一个失败自动换下一个。例如：\nhttps://api.openai.com/v1|sk-xxxx|gpt-4o-mini\nhttps://dashscope.aliyuncs.com/compatible-mode/v1|sk-yyyy|qwen-plus\napi_key 留空则不发送鉴权头",
-    "type": "text",
+  "translate_openai_prefill": {
+    "description": "OpenAI 接口",
+    "hint": "从下面的列表里选一个预设接口，点「保存」后，接口地址和常用模型会自动填进下面两个框。想用别的接口就选「自定义」，然后自己填。",
+    "type": "string",
+    "options": [
+      "custom",
+      "openai",
+      "dashscope",
+      "deepseek",
+      "siliconflow",
+      "moonshot",
+      "zhipu",
+      "openrouter",
+      "ollama"
+    ],
+    "labels": [
+      "自定义（手动填地址）",
+      "OpenAI 官方",
+      "阿里云 百炼/通义千问",
+      "DeepSeek 官方",
+      "硅基流动 SiliconFlow",
+      "月之暗面 Kimi",
+      "智谱 GLM",
+      "OpenRouter",
+      "本地 Ollama"
+    ],
+    "default": "custom"
+  },
+  "translate_openai_base_url": {
+    "description": "OpenAI 接口地址",
+    "hint": "填到 /v1 为止，例如 https://api.openai.com/v1 或 https://dashscope.aliyuncs.com/compatible-mode/v1。插件会自动在后面拼 /chat/completions 和 /models",
+    "type": "string",
     "default": ""
+  },
+  "translate_openai_api_key": {
+    "description": "OpenAI 接口密钥",
+    "hint": "填 sk-xxxx。留空则不发送鉴权头（本地部署的接口可能不需要 key）",
+    "type": "string",
+    "default": "",
+    "secret": true
+  },
+  "translate_openai_model": {
+    "description": "直译模型",
+    "hint": "点右边「获取模型列表」会自动请求你上面填的接口 /models 并拉取可选模型；拉不到时也可以直接手填模型名",
+    "type": "string",
+    "default": "",
+    "options": [],
+    "apply_provider_default": true
   },
   "translate_system_prompt": {
     "description": "直译系统提示词",

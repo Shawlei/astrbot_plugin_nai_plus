@@ -73,7 +73,10 @@
 | `translate_enabled` | 开启提示词直译（中文/英文 → 英文标签） | `true` |
 | `translate_mode` | 直译接入方式（下拉选择）：`用 AstrBot 的模型` / `自定义 OpenAI 兼容接口` | 用 AstrBot 的模型 |
 | `translate_provider_ids` | AstrBot 模式的翻译模型，**直接从下拉框勾选**（可多选做轮询）；**留空自动使用 AstrBot 所有可用模型** | 空 |
-| `translate_openai_models` | OpenAI 模式的翻译模型，每行 `base_url\|api_key\|model` | 空 |
+| `translate_openai_prefill` | OpenAI 接口预设（下拉选择），选中后自动填好地址和常用模型 | 自定义 |
+| `translate_openai_base_url` | OpenAI 接口地址，填到 `/v1` 为止 | 空 |
+| `translate_openai_api_key` | OpenAI 接口密钥（`sk-xxx`，本地接口可留空） | 空 |
+| `translate_openai_model` | 直译模型，**可从接口实时拉取列表下拉选择**，也可手填 | 空 |
 | `translate_system_prompt` | 直译系统提示词，**已预填内置提示词**，可直接改；清空则恢复内置默认 | 内置提示词 |
 | `translate_timeout` | 单次翻译超时(秒) | `60` |
 | `translate_on_error` | 翻译失败时：`fallback`=用原文继续 / `abort`=终止不生图 | `fallback` |
@@ -214,18 +217,28 @@ command_names = nai,niu,绘
 - 勾多个：按顺序**轮询**，前一个失败（超时/限流/欠费/返回空）自动换下一个
 - 一个都不勾：回到上面的「自动发现全部可用模型」
 
-如果想彻底绕开 AstrBot、单独用一个 OpenAI 兼容接口来翻译：
+如果想彻底绕开 AstrBot、单独用一个 OpenAI 兼容接口来翻译，在配置面板上填**三个独立的框**即可
+（不再是一个多行文本框）：
+
+| 配置项 | 说明 |
+| --- | --- |
+| 「OpenAI 接口」 | 下拉选预设（OpenAI 官方 / 阿里云百炼 / DeepSeek / 硅基流动 / Kimi / 智谱 / OpenRouter / 本地 Ollama），选中后**自动帮你填好地址和常用模型** |
+| 「OpenAI 接口地址」 | 填到 `/v1` 为止，例如 `https://api.openai.com/v1`。只填域名也能认，插件会自动补 `/v1` |
+| 「OpenAI 接口密钥」 | `sk-xxxx`；本地 Ollama 这类不需要鉴权的可以留空 |
+| 「直译模型」 | 点右边「获取模型列表」，插件会实时请求 `{地址}/models` **把可用模型拉成下拉框**；拉不到时也可以直接手填模型名 |
 
 ```
 translate_mode = openai
-translate_openai_models =
-https://api.openai.com/v1|sk-xxxx|gpt-4o-mini
-https://dashscope.aliyuncs.com/compatible-mode/v1|sk-yyyy|qwen-plus
+translate_openai_prefill   = deepseek          # 选预设，自动填下面两项
+translate_openai_base_url = https://api.deepseek.com/v1
+translate_openai_api_key  = sk-xxxx
+translate_openai_model    = deepseek-chat
 ```
 
-> - 每行格式 `base_url|api_key|model`，`api_key` 可以留空
-> - **轮询**：前一个失败（超时/限流/欠费/返回空）就自动换下一个，全部失败才报错
-> - 成功的模型会被记住，下次优先使用
+> - 插件会自动拼 `/chat/completions` 和 `/models`，所以地址**不要**带这两段
+> - 拉取模型列表失败（网络不通 / 没填 key / 接口不支持 `/models`）只会打日志，
+>   配置面板照常渲染，「直译模型」退化成普通输入框，手填一样能用
+> - 翻译失败可以配置 `translate_on_error` 决定是回退用原文生图还是直接中止
 
 **直译系统提示词**
 

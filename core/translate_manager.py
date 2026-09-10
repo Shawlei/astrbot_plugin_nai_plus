@@ -4,8 +4,8 @@
 把用户输入（中文或英文）翻译成 NovelAI 能用的英文标签。
 
 支持两种后端（通过配置切换）：
-1. "astrbot" —— 调用 AstrBot 已配置的模型（可轮询多个）
-2. "openai"  —— 调用插件自己配的 OpenAI 兼容接口（可轮询多个）
+1. "astrbot" —— 复用 AstrBot 已配置的模型（可勾选多个做轮询）
+2. "openai"  —— 调用插件自己配的 OpenAI 兼容接口
 
 两者都支持轮询：某个模型调用失败时自动换下一个，全部失败才报错。
 """
@@ -114,8 +114,15 @@ class TranslateManager:
         # astrbot 模式：可轮询多个 provider id；留空则自动使用 AstrBot 当前默认模型
         self.provider_ids = _split_list(config.get("translate_provider_ids", ""))
         self._auto_provider = not self.provider_ids
-        # openai 模式：可轮询多个地址/key/模型
-        self.openai_models = _parse_openai_models(config.get("translate_openai_models", ""))
+
+        # openai 模式：单独一个端点（地址 + 密钥 + 模型）
+        # 以前是一个多行文本框，每行 base_url|api_key|model，填起来很痛苦，
+        # 现在拆成配置面板上三个独立输入框，模型还能从接口拉取。
+        self.openai_endpoint = {
+            "base_url": str(config.get("translate_openai_base_url", "") or "").strip(),
+            "api_key": str(config.get("translate_openai_api_key", "") or "").strip(),
+            "model": str(config.get("translate_openai_model", "") or "").strip(),
+        }
 
         self.system_prompt = str(config.get("translate_system_prompt", "")).strip() or SYSTEM_PROMPT
         self.timeout = int(config.get("translate_timeout", 60))
@@ -145,15 +152,23 @@ class TranslateManager:
             return ""
 
         if self.mode == "openai":
-            candidates = self.openai_models
+            candidates = [self.openai_endpoint] if self._openai_ready() else []
         else:
             candidates = self._resolve_astrbot_candidates()
 
         if not candidates:
             if self.mode == "openai":
+                missing = [
+                    label
+                    for key, label in (
+                        ("base_url", "接口地址"),
+                        ("model", "直译模型"),
+                    )
+                    if not self.openai_endpoint.get(key)
+                ]
                 raise TranslateError(
-                    "翻译已开启（OpenAI 模式）但没有配置任何模型，"
-                    "请到插件配置里填写「翻译模型（OpenAI 模式）」"
+                    "翻译已开启（OpenAI 模式）但还没配置：" + "、".join(missing) +
+                    "。请到插件配置的「OpenAI 接口地址」「直译模型」里填写"
                 )
             raise TranslateError(
                 "翻译已开启（AstrBot 模式）但 AstrBot 里没有可用的模型，"
@@ -188,6 +203,10 @@ class TranslateManager:
                 logger.warning("[Translate] %s 翻译失败，尝试下一个: %s", desc, e)
 
         raise TranslateError("所有翻译模型都失败了 → " + "；".join(errors))
+
+    def _openai_ready(self) -> bool:
+        """OpenAI 模式是否已经填够信息（地址 + 模型）"""
+        return bool(self.openai_endpoint.get("base_url") and self.openai_endpoint.get("model"))
 
     def _resolve_astrbot_candidates(self) -> list[Any]:
         """解析 astrbot 模式下要尝试的 provider 列表。
@@ -251,12 +270,12 @@ class TranslateManager:
 
     async def _translate_via_openai(self, item: dict, text: str) -> str:
         """通过自定义 OpenAI 兼容接口翻译"""
-        base_url = str(item.get("base_url", "")).rstrip("/")
+        base_url = _normalize_base_url(item.get("base_url", ""))
         api_key = str(item.get("api_key", ""))
         model = str(item.get("model", ""))
 
         if not base_url or not model:
-            raise TranslateError("OpenAI 接口的 base_url 或 model 没填")
+            raise TranslateError("OpenAI 接口的地址或模型没填")
 
         url = f"{base_url}/chat/completions"
         payload = {
@@ -346,16 +365,10 @@ def _split_list(value: Any) -> list[str]:
 
 
 def _parse_openai_models(value: Any) -> list[dict]:
-    """解析 OpenAI 兼容模型配置。
+    """兼容旧版配置：把多行 `base_url|api_key|model` 解析成端点列表。
 
-    支持两种写法：
-
-    1. 简洁写法（每个模型一行，用 | 分隔 base_url|api_key|model）：
-       https://api.openai.com/v1|sk-xxx|gpt-4o-mini
-       https://other.com/v1|sk-yyy|qwen-plus
-
-    2. JSON 写法：
-       [{"base_url": "...", "api_key": "...", "model": "..."}, ...]
+    仅用于测试/兼容历史数据。新版配置已经拆成三个独立输入框，
+    解析工作由 TranslateManager.__init__ 直接读字段完成。
     """
     if isinstance(value, str) and value.strip().startswith("["):
         try:
@@ -365,7 +378,6 @@ def _parse_openai_models(value: Any) -> list[dict]:
         except Exception as e:
             logger.warning("[Translate] OpenAI 配置 JSON 解析失败，按行解析: %s", e)
 
-    lines = []
     if isinstance(value, (list, tuple)):
         lines = [str(v) for v in value]
     else:
@@ -386,6 +398,102 @@ def _parse_openai_models(value: Any) -> list[dict]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# 拉取 OpenAI 兼容接口的模型列表
+#
+# 配置面板上「直译模型」旁边有个「获取模型列表」按钮，点了以后刷新配置页，
+# AstrBot 会去读这里返回的列表 —— 所以这里必须是个同步函数（配置面板是同步渲染的）。
+# 同步函数里不能 await，所以直接读配置缓存 + 用子进程跑一段异步请求。
+# ---------------------------------------------------------------------------
+
+def _normalize_base_url(base_url: str) -> str:
+    """把用户填的地址规整成可以直接拼 /chat/completions 的形式。
+
+    常见写法都能吃：
+        https://api.openai.com            → https://api.openai.com/v1
+        https://api.openai.com/v1/        → https://api.openai.com/v1
+        https://api.openai.com/v1/models  → https://api.openai.com/v1   （去掉误填的尾巴）
+    """
+    url = str(base_url or "").strip().rstrip("/")
+    if not url:
+        return ""
+    for tail in ("/chat/completions", "/completions", "/models"):
+        if url.endswith(tail):
+            url = url[: -len(tail)].rstrip("/")
+    # 本机 / 局域网地址通常走 /v1；显式带了版本号或路径的不动
+    if not url.endswith("/v1") and "/v1/" not in url + "/":
+        parsed_tail = url.split("//")[-1]
+        has_path = "/" in parsed_tail
+        if not has_path:
+            url = f"{url}/v1"
+    return url
+
+
+def fetch_openai_models(
+    base_url: str = "",
+    api_key: str = "",
+    timeout: float = 10.0,
+) -> list[str]:
+    """请求 `{base_url}/models` 并返回模型 id 列表。
+
+    同步函数（AstrBot 的配置面板就要求同步返回），内部用工作线程跑 aiohttp，
+    避免和已在运行的事件循环冲突（aiohttp 的 asyncio.run 会直接报错）。
+
+    任何失败都只打日志并返回空列表 —— 配置面板拉不到列表不该让整个页面挂掉，
+    用户仍然可以手动填模型名。
+    """
+    url = _normalize_base_url(base_url)
+    if not url:
+        logger.warning("[Translate] 未填写接口地址，无法拉取模型列表")
+        return []
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    async def _do_fetch() -> Any:
+        client_timeout = aiohttp.ClientTimeout(total=timeout, connect=min(8.0, timeout))
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.get(f"{url}/models", headers=headers) as resp:
+                body = await resp.text()
+                if resp.status != 200:
+                    raise RuntimeError(f"HTTP {resp.status}: {body[:150]}")
+                return json.loads(body)
+
+    try:
+        try:
+            asyncio.get_running_loop()
+            has_loop = True
+        except RuntimeError:
+            has_loop = False
+
+        if has_loop:
+            # 已经有事件循环在跑（AstrBot 是异步框架），另起线程跑
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                data = pool.submit(lambda: asyncio.run(_do_fetch())).result(timeout + 5)
+        else:
+            data = asyncio.run(_do_fetch())
+
+    except Exception as e:
+        logger.warning("[Translate] 拉取模型列表失败: %s", e)
+        return []
+
+    items = data.get("data") if isinstance(data, dict) else None
+    models: list[str] = []
+    if isinstance(items, list):
+        for item in items:
+            mid = item.get("id") if isinstance(item, dict) else item
+            mid = str(mid or "").strip()
+            if mid and mid not in models:
+                models.append(mid)
+    models.sort()
+    if models:
+        logger.info("[Translate] 从 %s 拉取到 %d 个模型", url, len(models))
+    return models
+
+
 def _rotate(items: Any, start: int) -> list:
     """把序列旋转成「从 start 开始」的顺序"""
     seq = list(items)
@@ -398,5 +506,5 @@ def _rotate(items: Any, start: int) -> list:
 def _describe_candidate(mode: str, item: Any) -> str:
     """生成用于日志的候选模型描述"""
     if mode == "openai" and isinstance(item, dict):
-        return f"{item.get('model', '?')}@{item.get('base_url', '?')}"
+        return f"{item.get('model', '?')}@{_normalize_base_url(item.get('base_url', '?'))}"
     return str(item)
