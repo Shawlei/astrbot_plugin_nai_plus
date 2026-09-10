@@ -1,8 +1,14 @@
 """
-Nai2API AstrBot 生图插件
+Nai2API AstrBot 生图插件（nai_plus 增强版）
 
 通过 Nai2API 网关调用 NovelAI 生成图片。
-支持 /nai 指令和 LLM 工具调用。
+
+本项目基于 helloWKQ 的原版插件二开，感谢原作者：
+    https://github.com/helloWKQ/AstrBot_Nai2API
+增强内容见 CHANGELOG.md 的 v1.2.0 / v1.3.0。
+
+注意：插件名特意用了 astrbot_plugin_nai_plus（不是 astrbot_plugin_nai2api），
+这样它能和原版插件同时装在同一台 AstrBot 上，不会互相顶掉。
 """
 
 import re
@@ -10,6 +16,10 @@ import time
 from pathlib import Path
 
 import mcp
+
+# 插件名。AstrBot 用这个名字区分插件，也是数据目录名。
+# 改这里要注意：数据目录会跟着变，已有预设/缓存不会自动迁移。
+PLUGIN_NAME = "astrbot_plugin_nai_plus"
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -193,7 +203,7 @@ class Nai2ApiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
-        self.data_dir = StarTools.get_data_dir("astrbot_plugin_nai2api")
+        self.data_dir = StarTools.get_data_dir(PLUGIN_NAME)
 
         api_url = str(config.get("api_url", "https://nai.sta1n.cn")).strip()
         token = str(config.get("token", "")).strip()
@@ -276,7 +286,7 @@ class Nai2ApiPlugin(Star):
         for name in extra:
             try:
                 register(
-                    star_name="astrbot_plugin_nai2api",
+                    star_name=PLUGIN_NAME,
                     command_name=name,
                     desc=f"NovelAI 生图（{name}）",
                     priority=1,

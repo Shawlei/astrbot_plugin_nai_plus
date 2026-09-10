@@ -1,7 +1,10 @@
-name: astrbot_plugin_nai2api
-display_name: Nai2API 生图
+name: astrbot_plugin_nai_plus
+display_name: Nai2API 生图（nai_plus 增强版）
 desc: >
-  通过 Nai2API 网关调用 NovelAI 生成图片，支持文生图指令和 LLM 工具调用。
+  通过 Nai2API 网关调用 NovelAI 生成图片。支持 /nai 指令和 LLM 工具调用，
+  内置 NovelAI V5 模型、提示词直译（中文/英文自动转英文标签）、
+  按模型区分扣点与高扣点二次确认、自定义命令名。
+  基于 helloWKQ/AstrBot_Nai2API 二开。
 version: v1.3.0
 author: 权
 astrbot_version: ">=4.16.0,<5"

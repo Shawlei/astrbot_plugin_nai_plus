@@ -1,6 +1,26 @@
-# astrbot_plugin_nai2api
+# astrbot_plugin_nai_plus
 
 通过 [Nai2API](https://github.com/STA1N156/Nai2API) 网关调用 NovelAI 生成图片的 AstrBot 插件。
+
+> **这是增强版（nai_plus）**，基于 [helloWKQ/AstrBot_Nai2API](https://github.com/helloWKQ/AstrBot_Nai2API) 二开。
+> 插件名特意用了 `astrbot_plugin_nai_plus`，所以**可以和原版同时安装**，互不冲突。
+
+## 致谢
+
+本项目的绝大部分基础功能来自 **[helloWKQ](https://github.com/helloWKQ)** 的原版插件，感谢原作者的开源：
+
+- 原项目：[helloWKQ/AstrBot_Nai2API](https://github.com/helloWKQ/AstrBot_Nai2API)
+- 上游依赖：[STA1N156/Nai2API](https://github.com/STA1N156/Nai2API) 网关
+- 图片能力：[NovelAI](https://novelai.net/)
+
+本增强版在其基础上新增了：
+
+| 增强内容 | 版本 |
+|---------|------|
+| NovelAI V5 模型支持、按「模型+尺寸」区分扣点、V5 普通尺寸二次确认 | v1.2.0 |
+| 提示词直译（中文/英文 → 英文标签）、翻译模型轮询、`-m` 切模型、自定义命令名 | v1.3.0 |
+
+具体改动见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 功能
 
@@ -23,7 +43,7 @@
 
 ## 安装
 
-将 `astrbot_plugin_nai2api` 目录放入 AstrBot 的 `data/plugins/` 下，重启 AstrBot。
+将 `astrbot_plugin_nai_plus` 目录放入 AstrBot 的 `data/plugins/` 下，重启 AstrBot。
 
 ## 配置
 
@@ -418,7 +438,7 @@ AI：来啦，正在用 AI 画笔创作... 🖌️
 ## 目录结构
 
 ```
-astrbot_plugin_nai2api/
+astrbot_plugin_nai_plus/
 ├── main.py                 # 插件入口，命令注册和 LLM Tool 注册
 ├── metadata.yaml           # 插件元数据
 ├── _conf_schema.json       # 配置 Schema
