@@ -4,8 +4,9 @@ desc: >
   通过 Nai2API 网关调用 NovelAI 生成图片。支持 /nai 指令和 LLM 工具调用，
   内置 NovelAI V5 模型、提示词直译（中文/英文自动转英文标签）、
   按模型区分扣点与高扣点二次确认、自定义命令名。
+  OpenAI 兼容直译接口独立配置地址与密钥，模型可从接口实时拉取下拉选择。
   基于 helloWKQ/AstrBot_Nai2API 二开。
-version: 1.0.0
+version: 1.0.1
 author: Shawlei
 astrbot_version: ">=4.16.0,<5"
 repo: https://github.com/Shawlei/astrbot_plugin_nai_plus
