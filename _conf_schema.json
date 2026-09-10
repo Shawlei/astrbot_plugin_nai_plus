@@ -279,5 +279,115 @@
       "abort"
     ],
     "default": "fallback"
+  },
+  "img2img_enabled": {
+    "description": "开启图生图",
+    "hint": "开启后，回复一张图片再发指令即可用它作为参考图。注意：Nai2API 网关本身没有图生图接口，这里需要你自己填一个支持图生图的渠道（详见 README）",
+    "type": "bool",
+    "default": false
+  },
+  "img2img": {
+    "description": "图生图渠道",
+    "condition": {
+      "img2img_enabled": true
+    },
+    "type": "object",
+    "items": {
+      "base_url": {
+        "description": "接口地址",
+        "hint": "完整地址，例如 https://api.openai.com/v1/images/edits 或 http://127.0.0.1:7860/sdapi/v1/img2img。插件不会自动补路径，请照渠道文档填全",
+        "type": "string",
+        "default": ""
+      },
+      "method": {
+        "description": "请求方式",
+        "type": "string",
+        "options": [
+          "POST",
+          "GET"
+        ],
+        "default": "POST"
+      },
+      "api_key": {
+        "description": "接口密钥",
+        "hint": "留空则不发送鉴权头（本地部署的接口通常不需要）",
+        "type": "string",
+        "default": "",
+        "secret": true
+      },
+      "auth_header": {
+        "description": "鉴权头名称",
+        "hint": "默认 Authorization。少数渠道用 X-API-Key 之类",
+        "type": "string",
+        "default": "Authorization"
+      },
+      "auth_prefix": {
+        "description": "鉴权头前缀",
+        "hint": "默认 Bearer （注意结尾有空格）。MiniMax 等渠道可能是空字符串",
+        "type": "string",
+        "default": "Bearer "
+      },
+      "content_type": {
+        "description": "提交格式",
+        "hint": "multipart/form-data 用于上传文件（Stable Diffusion WebUI、OpenAI images/edits 等多数渠道）；application/json 用于把图片以 base64 塞进 JSON（NovelAI、部分中转）",
+        "type": "string",
+        "options": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "default": "multipart/form-data"
+      },
+      "body_template": {
+        "description": "请求体模板",
+        "hint": "把渠道文档里的请求体粘进来，把具体值换成占位符：{{prompt}} {{negative}} {{image_base64}} {{image_data_url}} {{strength}} {{noise}} {{seed}} {{model}} {{size}}。JSON 格式直接写 JSON；multipart 格式每行写 key=value。完整示例见 README",
+        "type": "text",
+        "default": ""
+      },
+      "image_field": {
+        "description": "图片字段名",
+        "hint": "仅 multipart 格式需要。参考图在表单里的字段名，例如 image、init_images、file。默认 image",
+        "type": "string",
+        "default": "image"
+      },
+      "response_path": {
+        "description": "响应图片路径",
+        "hint": "从返回的 JSON 里取图片的路径，例如 data.0.b64_json 或 images.0。留空则自动识别常见字段。支持 a.b.0.c 这种写法",
+        "type": "string",
+        "default": ""
+      },
+      "default_strength": {
+        "description": "默认相似度",
+        "hint": "参考图的相似程度，越大越贴近原图。多数渠道建议 0.5-0.8。聊天里可用 --strength 临时覆盖",
+        "type": "float",
+        "default": 0.7,
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        }
+      },
+      "default_noise": {
+        "description": "默认降噪",
+        "hint": "改动幅度，越大离原图越远。多数渠道建议 0.1-0.3。聊天里可用 --noise 临时覆盖",
+        "type": "float",
+        "default": 0.2,
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        }
+      },
+      "timeout": {
+        "description": "请求超时(秒)",
+        "hint": "图生图通常比文生图慢，建议 120 秒以上",
+        "type": "int",
+        "default": 120,
+        "slider": {
+          "min": 30,
+          "max": 600,
+          "step": 10
+        }
+      }
+    }
   }
 }

@@ -31,17 +31,22 @@
 - **翻译模型轮询**：配多个翻译模型，前一个失败自动换下一个
 - **OpenAI 兼容接口配置友好**：地址/密钥分开填，模型可从接口实时拉取下拉选择
 - **自定义命令名**：`/nai` 可以改成 `/niu`、`/绘` 等，支持多个别名
+- **图生图**：回复一张图再发指令即可。后端是**通用 HTTP 模板**，任何支持图生图的渠道都能接
 - 5 个内置预设（来自 Nai2API 官方前端）+ 自定义预设保存/修改/删除
 - 支持普通/2K/4K 分辨率
 - 高扣点二次确认（V5 普通图 5 点、2K 15 点、4K 25 点），防误扣
 - 图片本地缓存，自动清理
 - 配套人格提示词（生图助手），无需手动写英文标签
 
-> **暂不支持图生图**。这不是插件没写，而是上游 Nai2API 网关没有对应接口：
-> 它的 `/generate` 只接受文字提示词，请求体里的 `action` 被硬编码为 `generate`，
-> `reference_image_multiple`（NovelAI 用来传参考图的字段）始终是空数组。
-> 想用图生图的话，需要网关作者先在 Nai2API 里加上
-> `/generate` 的 `action: 'img2img'` 分支与参考图参数，插件这边再接。
+> **关于图生图的后端选择**：NovelAI 本身是支持图生图的（`reference_image_multiple`），
+> 但 Nai2API 网关的 `/generate` 接口没把它暴露出来 —— 请求体里的 `action` 被硬编码成
+> `generate`，参考图字段也始终是空数组。所以：
+>
+> - **文生图**走 Nai2API（本插件的主流程）
+> - **图生图**走你自己配置的渠道，通过「图生图」配置里的**通用 HTTP 模板**对接
+>
+> 只要你的渠道有图生图接口（OpenAI `images/edits`、Stable Diffusion WebUI 的
+> `/sdapi/v1/img2img`、各种中转站的图生图端点…），照着下面的教程填一下就能用。
 
 ## 前置要求
 
@@ -87,9 +92,168 @@
 | `translate_system_prompt` | 直译系统提示词，**已预填内置提示词**，可直接改；清空则恢复内置默认 | 内置提示词 |
 | `translate_timeout` | 单次翻译超时(秒) | `60` |
 | `translate_on_error` | 翻译失败时：`fallback`=用原文继续 / `abort`=终止不生图 | `fallback` |
+| `img2img_enabled` | 开启图生图板块（关闭后「图生图」配置块整体隐藏） | `false` |
+| `img2img` | 图生图渠道配置（见下方教程） | 见教程 |
 
 > **重要**：如果要让 AI 助手自动调用生图，请确保 `llm_tool_enabled` 为 `true`，
 > 并启用 AstrBot 人格中引用的生图助手人格提示词。
+
+---
+
+## 图生图配置教程
+
+### 1. 它是怎么工作的
+
+插件本身不懂任何渠道的图生图协议。它做的事只有三件：
+
+1. 从你「回复的那条消息」里取出一张图
+2. 把这张图和你写的提示词，按你填的**模板**拼成一个 HTTP 请求
+3. 把渠道返回的图片抠出来发给用户
+
+所以「模板」是整个图生图能力的核心 —— 渠道文档里的请求体长什么样，
+你就把它粘进来，把具体的值换成 `{{占位符}}`。
+
+### 2. 可用占位符
+
+| 占位符 | 含义 |
+|--------|------|
+| `{{prompt}}` | 提示词（已经过直译的英文标签） |
+| `{{negative}}` | 负面提示词 |
+| `{{image_base64}}` | 参考图 base64（**不含** `data:` 前缀） |
+| `{{image_data_url}}` | 参考图 data URL（**含** `data:image/png;base64,` 前缀） |
+| `{{strength}}` | 相似度 0~1 |
+| `{{noise}}` | 降噪 0~1 |
+| `{{seed}}` | 随机种子 |
+| `{{model}}` | 模型名 |
+| `{{size}}` | 尺寸 |
+
+两个细节：
+
+- **未知占位符会原样保留**，不会被静默清空。模板写错名字时你能一眼看出来（日志里也有告警）。
+- 值的引号由你控制。写 `"prompt": "{{prompt}}"` 里的引号是模板自带的，
+  插件不会多加也不会少加 —— 所以 JSON 模板里**记得自己带上引号**。
+
+### 3. 两种提交格式
+
+**`multipart/form-data`** —— 图片以文件形式上传，多数渠道用这个
+（OpenAI `images/edits`、Stable Diffusion WebUI…）。
+
+`body_template` 每行写一个 `key=value`：
+
+```
+prompt={{prompt}}
+negative_prompt={{negative}}
+denoising_strength={{strength}}
+```
+
+> 参考图是通过「图片字段名」单独带上去的（默认 `image`，SD WebUI 要改成 `init_images`），
+> **不用**写进模板里。
+
+**`application/json`** —— 图片以 base64 塞进 JSON（NovelAI、部分中转站）。
+
+`body_template` 直接写 JSON：
+
+```json
+{
+  "prompt": "{{prompt}}",
+  "negative_prompt": "{{negative}}",
+  "image": "{{image_base64}}",
+  "strength": {{strength}},
+  "noise": {{noise}}
+}
+```
+
+> 注意 `{{strength}}` 两侧**不加引号**，因为它是数字，加引号可能被渠道拒绝。
+
+### 4. 各渠道填法示例
+
+<details>
+<summary><b>OpenAI images/edits（含官方及各家兼容中转）</b></summary>
+
+| 配置项 | 值 |
+|--------|-----|
+| 接口地址 | `https://api.openai.com/v1/images/edits` |
+| 请求方式 | `POST` |
+| 接口密钥 | `sk-xxx` |
+| 鉴权头名称 | `Authorization` |
+| 鉴权头前缀 | `Bearer ` |
+| 提交格式 | `multipart/form-data` |
+| 图片字段名 | `image` |
+| 响应图片路径 | `data.0.b64_json` |
+| 请求体模板 | `model={{model}}`<br>`prompt={{prompt}}`<br>`n=1`<br>`size={{size}}` |
+
+</details>
+
+<details>
+<summary><b>Stable Diffusion WebUI（/sdapi/v1/img2img）</b></summary>
+
+| 配置项 | 值 |
+|--------|-----|
+| 接口地址 | `http://127.0.0.1:7860/sdapi/v1/img2img` |
+| 提交格式 | `application/json` |
+| 图片字段名 | *(multipart 才用，这里留默认)* |
+| 响应图片路径 | `images.0` |
+| 请求体模板 | 见下方 JSON |
+
+```json
+{
+  "prompt": "{{prompt}}",
+  "negative_prompt": "{{negative}}",
+  "init_images": ["{{image_base64}}"],
+  "denoising_strength": {{strength}},
+  "sampler_name": "DPM++ 2M Karras",
+  "steps": 28,
+  "cfg_scale": 6
+}
+```
+
+</details>
+
+<details>
+<summary><b>通用「图生图」中转站（base64 + JSON）</b></summary>
+
+多数中转站都提供 OpenAI 风格的 `/v1/images/edits`，直接套用第一个示例即可。
+如果接口路径不同，只改「接口地址」这一项，模板保持不动。
+
+如果返回的是 URL 而不是 base64，把「响应图片路径」改成 `data.0.url`
+（插件会自动下载该 URL）。不确定路径时**留空**也行 —— 插件会扫一遍常见字段名。
+
+</details>
+
+### 5. 在聊天里用
+
+**最基本**：发一张图 → 长按/右键**回复**那张图 → 发送 `/nai 你的描述`
+
+```
+（回复一张人物照片）
+/nai 1girl, 银发, 站在窗边, 逆光
+```
+
+**临时调参**：
+
+| 参数 | 作用 |
+|------|------|
+| `--strength 0.6` | 相似度，越大越贴近原图 |
+| `--noise 0.15` | 降噪，越大离原图越远 |
+| `--i2i` | 强制走图生图（没找到参考图会明确报错） |
+| `--no-i2i` | 强制走文生图（即使回复里有图） |
+
+```
+/nai 改成赛博朋克风格 --strength 0.55 --noise 0.35
+```
+
+**自动判定规则**：图生图总开关打开 + 回复的消息里有图 → 自动走图生图；
+没有图就走原来的文生图。想强制指定就用上面两个参数。
+
+### 6. 常见问题
+
+| 现象 | 原因与解决 |
+|------|-----------|
+| `检测到参考图，但图生图渠道还没配置好` | 「接口地址」和「请求体模板」是必填项，缺一不可 |
+| `你加了 --i2i 要求图生图，但没找到参考图` | 记得**回复**带图的消息再发指令，直接发指令是找不到图的 |
+| 图生图不走二次确认 | 这是有意设计。图生图走的是你的渠道，扣点规则和 Nai2API 无关，插件无法预估 |
+| 报错「响应既不是图片也不是 JSON」 | 渠道返回了错误信息。检查密钥、图片字段名、模板格式是否和渠道文档一致 |
+| 返回的图路径找不到 | 先留空让插件自动识别；自动识别也失败时，按渠道文档手填，如 `data.0.b64_json` |
 
 ---
 
@@ -211,6 +375,22 @@ command_names = nai,niu,绘
 ```
 /nai 2K竖图 -p GalGame风 -m 5 一个女孩 --negative low quality --seed 42
 ```
+
+**图生图** — 回复一张图再发指令，就能基于那张图生成（需要先配置图生图渠道）：
+
+```
+（回复一张参考图）
+/nai 1girl, 银发, 站在窗边 --strength 0.6 --noise 0.2
+```
+
+| 参数 | 作用 |
+|------|------|
+| `--strength 0.6` | 相似度 0~1，越大越贴近原图 |
+| `--noise 0.15` | 降噪 0~1，越大离原图越远 |
+| `--i2i` | 强制走图生图 |
+| `--no-i2i` | 强制走文生图 |
+
+详细配置教程见上方的「[图生图配置教程](#图生图配置教程)」。
 
 **直译模型配置**
 

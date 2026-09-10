@@ -28,6 +28,7 @@ from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.star.filter.command import GreedyStr
 
 from .core.image_manager import ImageManager
+from .core.img2img_client import Img2ImgClient, Img2ImgError
 from .core.nai2api_client import (
     Nai2ApiClient,
     DEFAULT_ARTIST,
@@ -51,11 +52,27 @@ _SIZE_PATTERN = re.compile(
 _PRESET_PATTERN = re.compile(r'(?:-p|--preset)\s+(\S+)', re.IGNORECASE)
 _MODEL_PATTERN = re.compile(r'(?:-m|--model)\s+(\S+)', re.IGNORECASE)
 _SEED_PATTERN = re.compile(r'--seed\s+(\d+)', re.IGNORECASE)
+
+# 图生图参数（相似度 / 降噪），接受 0.7 和 .7 两种写法
+_STRENGTH_PATTERN = re.compile(r'--strength\s+(\d*\.?\d+)', re.IGNORECASE)
+_NOISE_PATTERN = re.compile(r'--noise\s+(\d*\.?\d+)', re.IGNORECASE)
+# 强制开关：不接参数的裸标志位
+_FORCE_I2I_PATTERN = re.compile(r'(?:^|\s)--i2i(?=\s|$)', re.IGNORECASE)
+_FORCE_T2I_PATTERN = re.compile(r'(?:^|\s)--no-i2i(?=\s|$)', re.IGNORECASE)
+
+# 「贪婪参数」的终止边界。--artist / --negative 的值会一直读到下一个参数名为止，
+# 所以每新增一个带值的参数，都必须加进这个列表，否则会被前面的贪婪匹配吃掉。
+#
+# 踩坑记录：加了 --strength 却忘了改这里，`--artist a, b --strength 0.7`
+# 会把整个 "--strength 0.7" 当成 artist 的一部分。
+_STOP_TOKENS = (
+    r'--negative|--artist|-p|--preset|-m|--model|--seed|--strength|--noise|--i2i|--no-i2i'
+)
 _ARTIST_PATTERN = re.compile(
-    r'--artist\s+(.+?)(?=\s+(?:--negative|-p|--preset|-m|--model|--seed)\s+|$)', re.DOTALL
+    rf'--artist\s+(.+?)(?=\s+(?:{_STOP_TOKENS})\s+|$)', re.DOTALL
 )
 _NEGATIVE_PATTERN = re.compile(
-    r'--negative\s+(.+?)(?=\s+(?:--artist|-p|--preset|-m|--model|--seed)\s+|$)', re.DOTALL
+    rf'--negative\s+(.+?)(?=\s+(?:{_STOP_TOKENS})\s+|$)', re.DOTALL
 )
 
 
@@ -65,6 +82,10 @@ HELP_TEXT = (
     "余额: /{cmd} balance(余额/点数/次数)\n"
     "尺寸: 竖图|横图|方图|2K竖图|2K横图|2K方图|4K竖图|4K横图|4K方图\n"
     "模型: 5(V5) | 4.5 | 4 | 3 | furry | 2 | safe   —— 也可写全名 nai-diffusion-5-full\n\n"
+    "图生图: 先发一张图，然后「回复」那张图再发本指令，会自动用它作参考图\n"
+    "  --strength 0.7   相似度（越大越贴近原图）\n"
+    "  --noise 0.2      降噪（越大离原图越远）\n"
+    "  --i2i / --no-i2i 强制走图生图 / 强制走文生图（防止回复带图时误触发）\n\n"
     "扣点说明:\n"
     "  V4.5 普通尺寸 = 1 点    V5 普通尺寸 = 5 点\n"
     "  2K = 15 点              4K = 25 点\n"
@@ -79,6 +100,7 @@ HELP_TEXT = (
     "  /{cmd} 1girl --artist best quality, absurdres\n"
     "  /{cmd} 1girl --negative bad anatomy, bad hands\n"
     "  /{cmd} 1girl --seed 12345\n"
+    "  (回复一张图) /{cmd} 换个背景 --strength 0.6      (图生图)\n"
     "  /{cmd} save 我的预设 best quality, absurdres, detailed\n"
     "  /{cmd} 保存 我的预设 best quality, absurdres, detailed\n"
     "  /{cmd} update 我的预设 best quality, masterpiece\n"
@@ -90,7 +112,8 @@ HELP_TEXT = (
 
 
 def _parse_nai_command(text: str) -> tuple[
-    str | None, str, str | None, str | None, str | None, int | None, str | None
+    str | None, str, str | None, str | None, str | None, int | None, str | None,
+    float | None, float | None, bool | None,
 ]:
     """
     解析 /nai 指令的参数。
@@ -98,12 +121,17 @@ def _parse_nai_command(text: str) -> tuple[
     格式:
         /nai [尺寸] <提示词> [-p <预设>] [-m <模型>] [--artist <质量前缀>]
              [--negative <负面提示词>] [--seed <种子>]
+             [--strength <相似度>] [--noise <降噪>] [--i2i | --no-i2i]
 
     参数顺序可以任意，但 --artist / --negative 的值会一直读到下一个
     "参数名"为止，所以这两个建议写在最后。
 
     Returns:
-        (size, prompt, preset_name, artist, negative, seed, model)
+        (size, prompt, preset_name, artist, negative, seed, model,
+         strength, noise, force_i2i)
+
+        force_i2i: True = 强制走图生图；False = 强制走文生图；None = 自动判断
+                   （自动判断的规则是「回复消息里有没有图」）
     """
     text = text.strip()
     size = None
@@ -135,6 +163,31 @@ def _parse_nai_command(text: str) -> tuple[
         seed = int(m.group(1))
         text = text[:m.start()] + text[m.end():]
 
+    # 提取相似度 / 降噪
+    strength = None
+    m = _STRENGTH_PATTERN.search(text)
+    if m:
+        strength = _clamp01(m.group(1))
+        text = text[:m.start()] + text[m.end():]
+
+    noise = None
+    m = _NOISE_PATTERN.search(text)
+    if m:
+        noise = _clamp01(m.group(1))
+        text = text[:m.start()] + text[m.end():]
+
+    # 提取强制开关（--no-i2i 要先判断，因为它是 --i2i 的超集）
+    force_i2i = None
+    m = _FORCE_T2I_PATTERN.search(text)
+    if m:
+        force_i2i = False
+        text = text[:m.start()] + text[m.end():]
+    else:
+        m = _FORCE_I2I_PATTERN.search(text)
+        if m:
+            force_i2i = True
+            text = text[:m.start()] + text[m.end():]
+
     # 提取负面提示词
     negative = None
     m = _NEGATIVE_PATTERN.search(text)
@@ -150,7 +203,122 @@ def _parse_nai_command(text: str) -> tuple[
         text = text[:m.start()] + text[m.end():]
 
     prompt = text.strip()
-    return size, prompt, preset_name, artist, negative, seed, model
+    return (
+        size, prompt, preset_name, artist, negative, seed, model,
+        strength, noise, force_i2i,
+    )
+
+
+def _clamp01(value) -> float | None:
+    """把用户输入的数值夹到 0~1。
+
+    相似度和降噪在几乎所有渠道里的合法区间都是 0~1，
+    这里提前夹一次，避免把 1.5 这种值原样发给渠道再吃一个难懂的报错。
+    """
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(1.0, f))
+
+
+async def _fetch_reference_image(event: AstrMessageEvent) -> tuple[str | None, str | None]:
+    """从「用户回复的那条消息」里取出参考图。
+
+    Returns:
+        (图片本地路径, 错误提示)。成功时第二个值为 None。
+
+    为什么用回复而不是「当前消息里带图」：
+    用户发图通常是一句话带图，此时那条消息本身就是图片消息，
+    再让用户在同一条消息里写提示词体验很别扭；而「先发图、再回复它发指令」
+    能复用历史图片（比如拿上一条生成结果继续改），更实用。
+    """
+    try:
+        from astrbot.core.utils.quoted_message import extract_quoted_message_images
+    except ImportError:
+        return None, (
+            "当前 AstrBot 版本不支持读取被回复消息里的图片（需要 4.16+），"
+            "图生图无法使用。可以用 --no-i2i 强制走文生图"
+        )
+
+    try:
+        refs = await extract_quoted_message_images(event)
+    except Exception as e:
+        logger.warning("[Nai2API] 读取被回复消息的图片失败: %s", e)
+        return None, f"读取参考图失败：{e}"
+
+    if not refs:
+        return None, None
+
+    # 只取第一张 —— 绝大多数图生图渠道只接受单张参考图，
+    # 多张图的行为各家不一致，与其猜不如明确只用第一张
+    first = refs[0]
+    logger.info("[Nai2API] 从回复消息里拿到参考图: %s", str(first)[:120])
+
+    try:
+        return await _materialize_image(first), None
+    except Exception as e:
+        logger.warning("[Nai2API] 参考图落地失败: %s", e)
+        return None, f"参考图下载/解码失败：{e}"
+
+
+def _materialize_image(ref: str) -> str:
+    """把图片引用规整成本地路径。
+
+    引用可能是 http(s) URL、base64://、data URL 或本地路径，
+    这里统一成路径，方便后续读成 bytes 发给渠道。
+
+    注意这是同步实现（用 urllib），因为调用点在做二次确认挂起时
+    需要立刻拿到结果；图都不大，可以接受。
+    """
+    import base64 as _b64
+    import tempfile
+
+    text = str(ref or "").strip()
+    if not text:
+        raise ValueError("空的图片引用")
+
+    # 已经是本地路径
+    p = Path(text)
+    if p.exists() and p.is_file():
+        return str(p)
+
+    # file:// URI
+    if text.startswith("file://"):
+        from urllib.parse import unquote, urlparse
+
+        path = unquote(urlparse(text).path)
+        if Path(path).exists():
+            return path
+        raise FileNotFoundError(f"file:// 指向的文件不存在: {path}")
+
+    # base64 形态
+    if text.startswith("base64://") or text.startswith("data:"):
+        payload = text.split("://", 1)[-1] if text.startswith("base64://") else text
+        if payload.startswith("data:"):
+            _, _, payload = payload.partition(",")
+        data = _b64.b64decode(payload)
+        suffix = ".png"
+        fd, tmp = tempfile.mkstemp(prefix="nai_ref_", suffix=suffix)
+        with open(fd, "wb") as f:
+            f.write(data)
+        return tmp
+
+    # 网络 URL → 下到临时目录
+    if text.startswith("http://") or text.startswith("https://"):
+        import urllib.request
+
+        req = urllib.request.Request(text, headers={"User-Agent": "AstrBot-NaiPlus/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read()
+        if not data:
+            raise ValueError("下载到的参考图是空的")
+        fd, tmp = tempfile.mkstemp(prefix="nai_ref_", suffix=".png")
+        with open(fd, "wb") as f:
+            f.write(data)
+        return tmp
+
+    raise ValueError(f"认不出的图片引用格式: {text[:80]}")
 
 
 def _parse_command_names(value) -> list[str]:
@@ -241,6 +409,13 @@ class Nai2ApiPlugin(Star):
         self._translate_on_error = str(
             config.get("translate_on_error", "fallback")
         ).strip().lower()
+
+        # 图生图（独立渠道，配置在 img2img 分组里）
+        self._img2img_enabled = bool(config.get("img2img_enabled", False))
+        img2img_conf = config.get("img2img") or {}
+        if not isinstance(img2img_conf, dict):
+            img2img_conf = {}
+        self.img2img = Img2ImgClient(img2img_conf)
 
         self._llm_tool_enabled = bool(config.get("llm_tool_enabled", True))
         self._show_image_info = bool(config.get("show_image_info", True))
@@ -404,6 +579,7 @@ class Nai2ApiPlugin(Star):
         """插件卸载时清理资源"""
         await self.client.close()
         await self.imgr.close()
+        await self.img2img.close()
 
     # ------------------------------------------------------------------
     # OpenAI 兼容接口的「选预设 → 自动填地址」与「拉取模型列表」
@@ -481,9 +657,18 @@ class Nai2ApiPlugin(Star):
 
     def _forward_result(self, event: AstrMessageEvent, title: str, content: str):
         """将查询结果以合并转发消息形式发送，不占用聊天空间"""
+        # 平台差异兜底：Telegram 之类的 sender id 不是数字，
+        # 某些平台的 message_obj 根本没有 sender 属性，
+        # 直接取会 AttributeError 导致整条消息发不出去 —— 这里逐个降级。
+        sender_id = event.get_sender_id() or ""
+        try:
+            nickname = event.message_obj.sender.nickname
+        except AttributeError:
+            nickname = None
+
         node = Node(
-            uin=int(event.get_sender_id()) if event.get_sender_id().isdigit() else 0,
-            name=event.message_obj.sender.nickname if hasattr(event.message_obj.sender, 'nickname') else "查询结果",
+            uin=int(sender_id) if sender_id.isdigit() else 0,
+            name=nickname or "查询结果",
             content=[Plain(f"{title}\n\n{content}")]
         )
         return event.chain_result([node])
@@ -491,6 +676,9 @@ class Nai2ApiPlugin(Star):
     async def _send_image_with_info(
         self, event: AstrMessageEvent, image_path: Path,
         preset_name: str | None, elapsed: float, model: str | None = None,
+        *,
+        is_img2img: bool = False,
+        strength: float | None = None,
     ):
         """发送图片+信息标签"""
         # 先发图片
@@ -498,23 +686,42 @@ class Nai2ApiPlugin(Star):
 
         # 如果开启了信息标签，则发送标签
         if self._show_image_info:
+            # 用户没写 --strength 时，实际生效的是配置里的默认值，
+            # 这里要显示「真正用出去的那个数」，否则标签会退化成一个没信息量的「图生图」
+            shown_strength = strength
+            if is_img2img and shown_strength is None:
+                shown_strength = self.img2img.default_strength
             await event.send(event.plain_result(
-                self._build_info_label(preset_name, elapsed, model)
+                self._build_info_label(
+                    preset_name, elapsed, model,
+                    is_img2img=is_img2img, strength=shown_strength,
+                )
             ))
 
     def _build_info_label(
-        self, preset_name: str | None, elapsed: float, model: str | None = None
+        self, preset_name: str | None, elapsed: float, model: str | None = None,
+        *, is_img2img: bool = False, strength: float | None = None,
     ) -> str:
         """构造信息标签文本，名称超长时截断（防止长串画师串刷屏）"""
         name = (preset_name or "默认").strip()
         if "," in name or len(name) > 40:
             # 预设名里带逗号说明用户直接写了画师串，只显示简短标识
             name = "自定义画师串"
+        if is_img2img:
+            # 图生图时模型名意义不大（渠道各不同），显示相似度更有用
+            extra = f"相似度{strength:.2f}" if strength is not None else "图生图"
+            label = f"{name} | 图生图 | {extra} | 耗时{int(elapsed)}秒"
+            return label
+
         label = f"{name} | 耗时{int(elapsed)}秒"
         if model:
-            # 模型名很长（nai-diffusion-5-full），简写成 v5 / v4.5 更好读
-            short = model.replace("nai-diffusion-", "v").replace("-full", "").replace("-curated", "c")
-            label = f"{label} | {short}"
+            # 模型名很长（nai-diffusion-5-full），简写成 v5 / v4.5 更好读。
+            # 先处理 4.5 再处理版本号，否则 "4-5" 这种带连字符的版本号
+            # 没法简单点替成 "."（V4.5 的版本号里真的有连字符）。
+            short = model.replace("nai-diffusion-", "")
+            short = short.replace("4-5", "4.5").replace("4.5", "4.5")
+            short = short.replace("-full", "").replace("-curated", "c")
+            label = f"{label} | v{short}"
         return label
 
     async def _do_generate(
@@ -525,12 +732,34 @@ class Nai2ApiPlugin(Star):
         negative: str | None = None,
         seed: int | None = None,
         model: str | None = None,
+        ref_image_path: str | None = None,
+        strength: float | None = None,
+        noise: float | None = None,
     ) -> Path:
-        """执行生图并返回本地图片路径"""
-        image_bytes = await self.client.generate(
-            prompt, size=size, artist=artist, negative=negative, seed=seed, model=model
-        )
-        return await self.imgr.save_image(image_bytes)
+        """执行生图并返回本地图片路径。
+
+        ref_image_path 不为空时走图生图（用配置的通用 HTTP 渠道），
+        否则走原来的 Nai2API 文生图。
+        """
+        if ref_image_path:
+            with open(ref_image_path, "rb") as f:
+                image_bytes = f.read()
+            out = await self.img2img.generate(
+                prompt,
+                image_bytes,
+                negative=negative,
+                strength=strength,
+                noise=noise,
+                seed=seed,
+                model=model or self.client.default_model,
+                size=self.client.resolve_size(size),
+            )
+        else:
+            out = await self.client.generate(
+                prompt, size=size, artist=artist, negative=negative,
+                seed=seed, model=model,
+            )
+        return await self.imgr.save_image(out)
 
     @_cmd("nai", {"nai"})
     async def nai_generate(self, event: AstrMessageEvent, args: GreedyStr):
@@ -587,7 +816,10 @@ class Nai2ApiPlugin(Star):
         if handled:
             return reply
 
-        size, prompt, preset_name, artist, negative, seed, model = _parse_nai_command(args)
+        (
+            size, prompt, preset_name, artist, negative, seed, model,
+            strength, noise, force_i2i,
+        ) = _parse_nai_command(args)
 
         if not prompt:
             return event.plain_result("提示词不能为空")
@@ -599,6 +831,34 @@ class Nai2ApiPlugin(Star):
         if preset_name and self.presets.get(preset_name) is None and artist is None:
             return event.plain_result(f"预设 '{preset_name}' 不存在，使用 /nai presets(预设) 查看可用预设")
 
+        # ---- 图生图判定 ----
+        # 规则：--no-i2i 强制文生图；--i2i 强制图生图；都不写就看回复消息里有没有图
+        ref_image_path = None
+        ref_warn = None
+
+        if self._img2img_enabled and force_i2i is not False:
+            got_ref, ref_err = await _fetch_reference_image(event)
+            if got_ref:
+                ref_image_path = got_ref
+            elif force_i2i:
+                # 用户明确要求图生图却没图，直接说清楚
+                return event.plain_result(
+                    "你加了 --i2i 要求图生图，但没找到参考图。\n"
+                    "用法：先发一张图，然后「回复」那条消息再发送本指令。"
+                )
+            elif ref_err:
+                # 自动判定模式下取图出错，降级为文生图但要告知
+                ref_warn = f"⚠️ {ref_err}，本次改为文生图"
+
+        if ref_image_path and not self.img2img.is_configured():
+            return event.plain_result(
+                "检测到参考图，但图生图渠道还没配置好。\n"
+                "请到插件配置里填「图生图」的接口地址和请求体模板，"
+                "或用 --no-i2i 强制走文生图。"
+            )
+
+        is_img2img = bool(ref_image_path)
+
         # 直译：中文/英文描述 → 英文标签
         # 注意放在扣点确认之前，这样确认提示里显示的是最终会送出去的提示词
         translated, trans_err = await self._translate_prompt(prompt, event)
@@ -607,8 +867,8 @@ class Nai2ApiPlugin(Star):
             return event.plain_result(trans_err or "直译失败")
         prompt = translated
 
-        # 高扣点（V5 普通尺寸 / 2K / 4K）需要二次确认，避免误扣点数
-        need_confirm = self._resolve_confirm(size, model)
+        # 图生图走的是另一个渠道，扣点规则和 Nai2API 无关，不做点数确认
+        need_confirm = None if is_img2img else self._resolve_confirm(size, model)
         if need_confirm:
             reason, cost = need_confirm
             self._pending_hd[event.unified_msg_origin] = {
@@ -620,6 +880,9 @@ class Nai2ApiPlugin(Star):
                 "seed": seed,
                 "preset": preset_name,
                 "model": model,
+                "strength": strength,
+                "noise": noise,
+                "ref_image_path": ref_image_path,
             }
             msg = (
                 f"⚠️ 本次使用{reason}，将消耗 {cost} 点"
@@ -630,11 +893,14 @@ class Nai2ApiPlugin(Star):
                 msg = f"{trans_err}\n\n{msg}"
             return event.plain_result(msg)
 
+        if ref_warn:
+            await event.send(event.plain_result(ref_warn))
         if trans_err:
             await event.send(event.plain_result(trans_err))
 
         return await self._run_generate_command(
-            event, prompt, size, final_artist, negative, seed, preset_name, model
+            event, prompt, size, final_artist, negative, seed, preset_name, model,
+            ref_image_path=ref_image_path, strength=strength, noise=noise,
         )
 
     async def _run_generate_command(
@@ -647,6 +913,10 @@ class Nai2ApiPlugin(Star):
         seed: int | None,
         preset_name: str | None,
         model: str | None = None,
+        *,
+        ref_image_path: str | None = None,
+        strength: float | None = None,
+        noise: float | None = None,
     ):
         """真正执行指令生图并发送结果"""
         start = time.time()
@@ -654,9 +924,14 @@ class Nai2ApiPlugin(Star):
             image_path = await self._do_generate(
                 prompt, size=size, artist=artist, negative=negative,
                 seed=seed, model=model,
+                ref_image_path=ref_image_path, strength=strength, noise=noise,
             )
             elapsed = time.time() - start
-            await self._send_image_with_info(event, image_path, preset_name, elapsed, model)
+            await self._send_image_with_info(
+                event, image_path, preset_name, elapsed, model,
+                is_img2img=bool(ref_image_path),
+                strength=strength,
+            )
             return None
         except Exception as e:
             logger.error("[Nai2API] 生图失败: %s", e)
@@ -701,6 +976,9 @@ class Nai2ApiPlugin(Star):
                 pending["seed"],
                 pending["preset"],
                 pending.get("model"),
+                ref_image_path=pending.get("ref_image_path"),
+                strength=pending.get("strength"),
+                noise=pending.get("noise"),
             )
 
         if args in self._CANCEL_WORDS:
@@ -805,6 +1083,15 @@ class Nai2ApiPlugin(Star):
         if not name or not artist:
             return event.plain_result("名称和质量前缀不能为空")
 
+        # 内置预设不允许被覆盖：用户以为在「备份自己的组合」，
+        # 实际把内置的 GalGame风 改掉之后，别人（和自己）再 `/nai -p GalGame风`
+        # 拿到的就不是文档里那个效果了，很难排查。改成直接拒绝并指路。
+        if self.presets.is_builtin(name):
+            return event.plain_result(
+                f"'{name}' 是内置预设，不能覆盖。\n"
+                f"换个名字保存即可，例如：/nai save 我的{name} {artist}"
+            )
+
         is_overwrite = self.presets.get(name) is not None
         self.presets.save(name, artist)
         action = "已更新" if is_overwrite else "已保存"
@@ -863,6 +1150,7 @@ class Nai2ApiPlugin(Star):
         preset: str = "",
         seed: str = "0",
         model: str = "",
+        strength: str = "",
     ):
         """使用 NovelAI 生成图片。
 
@@ -874,6 +1162,7 @@ class Nai2ApiPlugin(Star):
             preset(string): 预设名称，例如 "高质量"、"动漫风"，留空使用默认
             seed(string): 随机种子，数字字符串，"0" 表示自动随机，相同种子可复现图片
             model(string): 模型，可选 "5"（V5，普通图 5 点）、"4.5"（V4.5，普通图 1 点）等，留空用默认
+            strength(string): 图生图相似度 0~1。只有当用户在这条消息里回复了一张图片、且插件开了图生图时才有意义，留空用默认
         """
         if not self._llm_tool_enabled:
             return mcp.types.CallToolResult(
@@ -885,6 +1174,14 @@ class Nai2ApiPlugin(Star):
                 content=[mcp.types.TextContent(type="text", text="提示词不能为空")]
             )
 
+        # 图生图：LLM 场景下同样支持「用户回复了图片」的情况
+        ref_image_path = None
+        if self._img2img_enabled:
+            got_ref, _ = await _fetch_reference_image(event)
+            ref_image_path = got_ref
+            if ref_image_path and not self.img2img.is_configured():
+                ref_image_path = None
+
         # 直译：中文/英文都交给翻译模型转成英文 NovelAI 标签
         translated, trans_err = await self._translate_prompt(prompt.strip(), event)
         if translated is None:
@@ -894,6 +1191,8 @@ class Nai2ApiPlugin(Star):
                 )]
             )
         prompt_en = translated
+
+        strength_val = _clamp01(strength) if strength.strip() else None
 
         # 模型别名解析（"5"、"4.5"、"v5" 等）
         final_model = resolve_model_alias(model.strip()) if model.strip() else None
@@ -933,17 +1232,22 @@ class Nai2ApiPlugin(Star):
                 negative=negative.strip() or None,
                 seed=final_seed,
                 model=final_model,
+                ref_image_path=ref_image_path,
+                strength=strength_val,
             )
             elapsed = time.time() - start
 
             await self._send_image_with_info(
-                event, image_path, preset.strip() or None, elapsed, final_model
+                event, image_path, preset.strip() or None, elapsed, final_model,
+                is_img2img=bool(ref_image_path),
+                strength=strength_val,
             )
 
+            mode = "图生图" if ref_image_path else "文生图"
             return mcp.types.CallToolResult(
                 content=[mcp.types.TextContent(
                     type="text",
-                    text=f"图片已生成并发送给用户。英文提示词: {prompt_en[:100]}"
+                    text=f"图片已生成并发送给用户（{mode}）。英文提示词: {prompt_en[:100]}"
                 )]
             )
         except Exception as e:
