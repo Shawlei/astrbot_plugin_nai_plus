@@ -71,10 +71,10 @@
 | `max_cached_images` | 图片最大缓存数 | `50` |
 | `command_names` | 命令名，多个用逗号分隔，如 `nai,niu,绘` | `nai` |
 | `translate_enabled` | 开启提示词直译（中文/英文 → 英文标签） | `true` |
-| `translate_mode` | 直译接入方式：`astrbot`（用 AstrBot 的模型）/ `openai`（自定义接口） | `astrbot` |
+| `translate_mode` | 直译接入方式（下拉选择）：`用 AstrBot 的模型` / `自定义 OpenAI 兼容接口` | 用 AstrBot 的模型 |
 | `translate_provider_ids` | AstrBot 模式的翻译模型，**直接从下拉框勾选**（可多选做轮询）；**留空自动使用 AstrBot 所有可用模型** | 空 |
 | `translate_openai_models` | OpenAI 模式的翻译模型，每行 `base_url\|api_key\|model` | 空 |
-| `translate_system_prompt` | 自定义直译系统提示词（留空用内置） | 空 |
+| `translate_system_prompt` | 直译系统提示词，**已预填内置提示词**，可直接改；清空则恢复内置默认 | 内置提示词 |
 | `translate_timeout` | 单次翻译超时(秒) | `60` |
 | `translate_on_error` | 翻译失败时：`fallback`=用原文继续 / `abort`=终止不生图 | `fallback` |
 
@@ -226,6 +226,19 @@ https://dashscope.aliyuncs.com/compatible-mode/v1|sk-yyyy|qwen-plus
 > - 每行格式 `base_url|api_key|model`，`api_key` 可以留空
 > - **轮询**：前一个失败（超时/限流/欠费/返回空）就自动换下一个，全部失败才报错
 > - 成功的模型会被记住，下次优先使用
+
+**直译系统提示词**
+
+配置里的「直译系统提示词」**已经预填了插件内置的提示词**，不用自己写。
+内置版本主要做了这些约束：
+
+- 只输出英文标签，不要解释、不要 markdown、不要引号
+- 保留 NovelAI 权重语法：`1.2::tag::`、`{{tag}}`、`[tag]`、`-2::tag::`、`\n20::tag::`
+- 保留 `artist:name` 这类画师标签
+- 不输出中文、尽量保持标签顺序
+
+想微调效果（比如强制某种画风、加固定质量词）可以直接在框里改。
+改坏了想恢复，把内容清空保存即可，插件会自动用回内置提示词。
 > - 翻译失败时怎么办由 `translate_on_error` 决定：
 >   - `fallback`（默认）：用原文继续生图，并提示一句
 >   - `abort`：直接终止，避免翻译失败还白白扣点

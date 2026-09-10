@@ -1,6 +1,29 @@
 # 更新日志
 
-## v1.3.1
+> 说明：本仓库自 v1.0.0 起独立计数（原项目基于 helloWKQ/AstrBot_Nai2API 二开，
+> 早期内部迭代过 v1.2.0 / v1.3.x，为对接 AstrBot 插件市场，版本号从 1.0.0 重新开始）。
+
+## v1.0.0（首个发布版）
+
+这是对接 AstrBot 插件市场的首个正式版本，内容 = 之前内部迭代的 v1.3.1。
+主要特性：
+
+- **NovelAI V5 模型支持**，并按「模型 + 尺寸」双维度区分扣点
+  - V4.5 普通图 1 点，V5 普通图 5 点，2K 15 点，4K 25 点
+  - V5 普通尺寸、2K、4K 都会先二次确认，防误扣
+- **提示词直译**：中文/英文都自动翻成 NovelAI 英文标签
+  - 保留 `1.2::tag::`、`{{tag}}`、`-2::tag::` 等权重语法和 `artist:name` 画师标签
+  - 直译模型支持下拉框勾选（可多选轮询，失败自动切换）
+  - 也支持自定义 OpenAI 兼容接口
+- **`-m` 参数切换模型**：`/nai -m 5 -p 动漫风 1girl, silver hair`
+- **自定义命令名**：`command_names` 支持 `nai,niu,绘` 等多个别名
+- 图片本地缓存、自定义预设、余额查询、LLM 工具调用
+
+详细演进过程见下方历史版本记录。
+
+## 历史版本（内部迭代，未单独发布）
+
+### v1.3.1
 
 - **翻译模型改成下拉框勾选，不用再手抄 provider id**
   - 原来 `translate_provider_ids` 是个文本框，要手动填 AstrBot 的模型 ID，
@@ -14,7 +37,7 @@
 - 顺带把插件名改成 `astrbot_plugin_nai_plus`（原 `astrbot_plugin_nai2api`），
   这样能和原版插件同时安装，不会互相顶掉；README 补充了对原作者 helloWKQ 的致谢
 
-## v1.3.0
+### v1.3.0
 
 - **新增提示词直译：中文/英文都自动翻成 NovelAI 能认的英文标签**
   - 中文直接写就行，不用自己翻成英文标签：`/nai 一个银发蓝眼的女孩`
@@ -50,7 +73,7 @@
   - 改完命令名需要**重载插件**才生效
 - 帮助文本改为按实际命令名渲染，并补上 `-m` 说明和中文示例
 
-## v1.2.0
+### v1.2.0
 
 - 新增 NovelAI V5 系列模型支持
   - 模型列表加入 `nai-diffusion-5-full`、`nai-diffusion-5-curated`
@@ -70,7 +93,7 @@
 - 新增扣点计算模块 `get_generation_cost()` / `is_v5_model()`，集中管理扣点规则
 - 帮助文本补充扣点说明表
 
-## v1.1.0
+### v1.1.0
 
 - 新增「修改预设」功能
   - 指令：`/nai update <名称> <新的质量前缀>` 或 `/nai 修改 <名称> <新的质量前缀>`
@@ -79,7 +102,7 @@
   - `PresetManager` 新增 `update()` 方法，支持只修改部分字段
 - 帮助信息和 docstring 同步更新
 
-## v1.0.11
+### v1.0.11
 
 - 真正修复 Gemini 等模型通过 OpenAI 兼容层调用 LLM 工具时报 `value at top-level must be a list` 错误的问题
 - 根本原因：AstrBot 框架 `register_llm_tool` / `spec_to_func` 生成的 JSON Schema 不包含 `required` 字段，Gemini API 对工具 Schema 校验严格，缺少 `required` 字段时返回 400 错误
@@ -87,7 +110,7 @@
 - 涉及工具：`nai_generate`(prompt)、`nai_get_balance`(detail)、`nai_list_presets`(preset_name)、`nai_save_preset`(name, artist)、`nai_delete_preset`(name)
 - v1.0.10 的"必填参数"方案无效，因为框架根本不根据参数默认值生成 `required` 字段
 
-## v1.0.10
+### v1.0.10
 
 - 彻底修复 Gemini 等模型通过 OpenAI 兼容层调用 LLM 工具时报 `value at top-level must be a list` 错误的问题
 - 根本原因：AstrBot 框架 `spec_to_func` 生成 JSON Schema 时不设置 `required` 字段，当工具所有参数都有默认值（零必填）时，Gemini 校验失败
@@ -95,56 +118,56 @@
 - 将 `nai_list_presets` 的 `preset_name` 参数改为必填（去掉默认值 `""`），内部逻辑重写：填 "all"/"全部" 列出所有预设，填具体名称查看单个预设
 - 至此所有 5 个 LLM 工具均至少有一个必填参数，Schema 生成正常
 
-## v1.0.9
+### v1.0.9
 
 - 修复 LLM 工具调用与部分 AI 模型（如 Gemini）的兼容性问题
 - 将 `nai_generate` 工具的 `seed` 参数从 int 类型改为 string 类型，避免 Schema 验证错误
 - 为 `nai_get_balance` 工具添加 `detail` 参数，解决零参数导致的 Schema 生成问题
 - 函数内部自动处理类型转换，不影响正常使用
 
-## v1.0.8
+### v1.0.8
 
 - 新增 `AI_MODIFY_RULES.md` AI 修改要点文档（记录修改规范、退回方法、沟通注意事项）
 - 补更新 CHANGELOG.md 和 README.md（之前漏掉了）
 - 开发者说明：零基础新手
 
-## v1.0.7
+### v1.0.7
 
 - 生图成功后显示信息标签：`预设名 | 耗时X秒`
 - 生图失败时也显示信息标签，包含简要失败原因
 - 插件配置新增 `show_image_info` 开关（默认开启）
 - 指令生图和 LLM 工具生图都支持
 
-## v1.0.6
+### v1.0.6
 
 - 修复合并转发消息功能丢失的问题（合并分支时被覆盖）
 - 恢复查询类结果使用合并转发消息发送（余额查询、预设列表）
 - 图片文件名包含提示词，方便服务器上查找管理
 
-## v1.0.5
+### v1.0.5
 
 - 生成的图片文件名包含提示词（清洗后），方便在服务器上查找和管理
 
-## v1.0.4
+### v1.0.4
 
 - 新增 CHANGELOG.md 更新日志文件
 
-## v1.0.3
+### v1.0.3
 
 - 查询类结果（余额查询、预设列表）改用合并转发消息发送，不再刷屏
 
-## v1.0.2
+### v1.0.2
 
 - 添加 LLM 工具调用：查询余额（nai_get_balance）
 - 添加 LLM 工具调用：预设管理（nai_list_presets、nai_save_preset、nai_delete_preset）
 - 修复 LLM 工具调用结果不发送给用户的问题
 
-## v1.0.1
+### v1.0.1
 
 - 修复 `/nai save` 指令参数丢失的问题
 - 添加查看单个预设详情功能（`/nai presets <预设名>`）
 
-## v1.0.0
+### v1.0.0（原版项目的初始版本，仅作追溯保留）
 
 - 初始版本
 - `/nai` 指令文生图，支持尺寸、预设、质量前缀、负面提示词、随机种子
