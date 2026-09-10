@@ -72,7 +72,7 @@
 | `command_names` | 命令名，多个用逗号分隔，如 `nai,niu,绘` | `nai` |
 | `translate_enabled` | 开启提示词直译（中文/英文 → 英文标签） | `true` |
 | `translate_mode` | 直译接入方式：`astrbot`（用 AstrBot 的模型）/ `openai`（自定义接口） | `astrbot` |
-| `translate_provider_ids` | AstrBot 模式的翻译模型 ID，多个用逗号分隔；**留空自动使用 AstrBot 所有可用模型** | 空 |
+| `translate_provider_ids` | AstrBot 模式的翻译模型，**直接从下拉框勾选**（可多选做轮询）；**留空自动使用 AstrBot 所有可用模型** | 空 |
 | `translate_openai_models` | OpenAI 模式的翻译模型，每行 `base_url\|api_key\|model` | 空 |
 | `translate_system_prompt` | 自定义直译系统提示词（留空用内置） | 空 |
 | `translate_timeout` | 单次翻译超时(秒) | `60` |
@@ -204,12 +204,15 @@ command_names = nai,niu,绘
 
 **直译模型配置**
 
-默认（`translate_mode = astrbot`）不用配任何东西：插件会**自动发现** AstrBot 里已配置的对话模型，
-挨个试，谁先成功用谁。也可以手动指定、并配多个做轮询：
+默认（`translate_mode = astrbot`）**不用配任何东西**：插件会**自动发现** AstrBot 里已配置的对话模型，
+挨个试，谁先成功用谁（会自动跳过 TTS / STT / 向量模型这类不能翻译的）。
 
-```
-translate_provider_ids = 模型ID1, 模型ID2
-```
+想指定用哪个模型？在配置面板里点「翻译模型（AstrBot 模式）」右边的按钮，
+**直接从下拉列表里勾选** AstrBot 已经配好的模型即可，不用手抄 ID：
+
+- 勾一个：只用它翻译
+- 勾多个：按顺序**轮询**，前一个失败（超时/限流/欠费/返回空）自动换下一个
+- 一个都不勾：回到上面的「自动发现全部可用模型」
 
 如果想彻底绕开 AstrBot、单独用一个 OpenAI 兼容接口来翻译：
 

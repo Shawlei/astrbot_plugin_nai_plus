@@ -156,9 +156,13 @@
   },
   "translate_provider_ids": {
   "description": "翻译模型（AstrBot 模式）",
-  "hint": "填 AstrBot 已配置的模型 ID（provider id），多个用逗号分隔，按顺序轮询：前一个失败自动换下一个。留空则自动使用 AstrBot 当前默认模型",
-  "type": "text",
-  "default": ""
+  "hint": "点右边按钮直接从 AstrBot 已配置的模型里勾选，可以勾多个：按顺序轮询，前一个失败自动换下一个。留空则自动使用 AstrBot 里所有可用的对话模型",
+  "type": "list",
+  "items": {
+  "type": "string"
+  },
+  "default": [],
+  "_special": "select_providers"
   },
   "translate_openai_models": {
   "description": "翻译模型（OpenAI 模式）",

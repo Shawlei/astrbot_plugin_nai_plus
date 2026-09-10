@@ -1,5 +1,19 @@
 # 更新日志
 
+## v1.3.1
+
+- **翻译模型改成下拉框勾选，不用再手抄 provider id**
+  - 原来 `translate_provider_ids` 是个文本框，要手动填 AstrBot 的模型 ID，
+    但那个 ID 是一长串 uuid，很难抄、很容易填错
+  - 现在改用 AstrBot 官方的 `_special: select_providers` 机制，
+    配置面板会渲染成一个按钮，点开直接列出 AstrBot 里已配置的模型，勾选即可
+  - 支持多选：勾多个就按顺序轮询，前一个失败自动换下一个
+  - 一个都不勾仍然是「自动发现全部可用对话模型」，行为和之前一致
+  - 配置类型从 `text` 改成 `list`，代码侧 `_split_list` 同时兼容「列表」和
+    「逗号分隔字符串」两种形式，老配置不会失效
+- 顺带把插件名改成 `astrbot_plugin_nai_plus`（原 `astrbot_plugin_nai2api`），
+  这样能和原版插件同时安装，不会互相顶掉；README 补充了对原作者 helloWKQ 的致谢
+
 ## v1.3.0
 
 - **新增提示词直译：中文/英文都自动翻成 NovelAI 能认的英文标签**

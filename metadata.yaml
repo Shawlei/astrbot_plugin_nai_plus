@@ -5,7 +5,7 @@ desc: >
   内置 NovelAI V5 模型、提示词直译（中文/英文自动转英文标签）、
   按模型区分扣点与高扣点二次确认、自定义命令名。
   基于 helloWKQ/AstrBot_Nai2API 二开。
-version: v1.3.0
+version: v1.3.1
 author: 权
 astrbot_version: ">=4.16.0,<5"
 repo: https://github.com/Shawlei/astrbot_plugin_nai_plus
