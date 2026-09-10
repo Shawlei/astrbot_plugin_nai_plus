@@ -4,10 +4,13 @@
 
 ## 功能
 
-- `/nai` 指令文生图，支持尺寸、预设、质量前缀、负面提示词、随机种子
+- `/nai` 指令文生图，支持尺寸、预设、模型、质量前缀、负面提示词、随机种子
 - LLM Tool 调用生图（AI 助手可直接调用）
 - 支持 NovelAI V5 最新模型（含 V5 Full / V5 Curated）
-- 5 个内置预设（来自 Nai2API 官方前端）+ 自定义预设保存/删除
+- **提示词直译**：中文/英文都会自动翻成 NovelAI 英文标签，不用自己写标签
+- **翻译模型轮询**：配多个翻译模型，前一个失败自动换下一个
+- **自定义命令名**：`/nai` 可以改成 `/niu`、`/绘` 等，支持多个别名
+- 5 个内置预设（来自 Nai2API 官方前端）+ 自定义预设保存/修改/删除
 - 支持普通/2K/4K 分辨率
 - 高扣点二次确认（V5 普通图 5 点、2K 15 点、4K 25 点），防误扣
 - 图片本地缓存，自动清理
@@ -46,6 +49,14 @@
 | `allow_2k` | 允许生成 2K 图片（关闭后自动降级为普通尺寸，防误扣 15 点） | `true` |
 | `allow_4k` | 允许生成 4K 图片（关闭后自动降级为普通尺寸，防误扣 25 点） | `true` |
 | `max_cached_images` | 图片最大缓存数 | `50` |
+| `command_names` | 命令名，多个用逗号分隔，如 `nai,niu,绘` | `nai` |
+| `translate_enabled` | 开启提示词直译（中文/英文 → 英文标签） | `true` |
+| `translate_mode` | 直译接入方式：`astrbot`（用 AstrBot 的模型）/ `openai`（自定义接口） | `astrbot` |
+| `translate_provider_ids` | AstrBot 模式的翻译模型 ID，多个用逗号分隔；**留空自动使用 AstrBot 所有可用模型** | 空 |
+| `translate_openai_models` | OpenAI 模式的翻译模型，每行 `base_url\|api_key\|model` | 空 |
+| `translate_system_prompt` | 自定义直译系统提示词（留空用内置） | 空 |
+| `translate_timeout` | 单次翻译超时(秒) | `60` |
+| `translate_on_error` | 翻译失败时：`fallback`=用原文继续 / `abort`=终止不生图 | `fallback` |
 
 > **重要**：如果要让 AI 助手自动调用生图，请确保 `llm_tool_enabled` 为 `true`，
 > 并启用 AstrBot 人格中引用的生图助手人格提示词。
@@ -76,11 +87,49 @@ AI → 自动调用 nai_generate 生成图片
 
 ### 方式二：手动写 `/nai` 指令
 
-直接在 `/nai` 后面写英文关键词（NovelAI 风格）：
+直接在 `/nai` 后面写**中文描述**或英文标签都可以（会自动直译）：
 
 ```
+/nai 一个银发蓝眼的女孩
 /nai 1girl, silver hair, blue eyes
 ```
+
+**提示词直译** — 中文/英文都会先翻成 NovelAI 能认的英文标签再生成：
+
+```
+/nai 一个穿着水手服的女孩，站在樱花树下   →  1girl, sailor uniform, cherry blossoms
+/nai a girl with long silver hair          →  1girl, long hair, silver hair
+```
+
+> - 直译是**内置功能，默认开启**，装完就能用，不需要额外配 key
+> - 默认直接使用 AstrBot 里已经配好的模型（`translate_mode = astrbot`）
+> - 想用别的便宜模型专门翻译？把 `translate_mode` 改成 `openai` 并填接口即可
+> - NovelAI 的权重语法（`1.2::tag::`、`{{tag}}`、`[tag]`）和画师标签会被原样保留
+> - 想关掉直译：`translate_enabled = false`
+
+**切换模型** — 用 `-m` 指定本次使用的模型（V5 普通图 5 点，V4.5 普通图 1 点）：
+
+```
+/nai -m 5 一个女孩            → 用 V5（nai-diffusion-5-full）
+/nai -m 4.5 一个女孩          → 用 V4.5（省钱，普通图只扣 1 点）
+/nai -m 5c 一个女孩           → 用 V5 Curated
+/nai -m furry 1girl           → 兽人风格
+```
+
+支持的简写：`5`、`5c`、`4.5`、`4.5c`、`4`、`3`、`furry`、`2`、`safe`，
+也可以直接写全名（`nai-diffusion-5-full`）。长参数 `--model` 等效。
+
+**改命令名** — 不喜欢 `/nai` 可以改（配置项 `command_names`）：
+
+```
+command_names = nai,niu,绘
+```
+
+之后 `/nai`、`/niu`、`/绘` 三个指令都能用。改完需要**重载插件**生效。
+
+> ⚠️ 「`/`」或「`+`」这个**前缀符号**是 AstrBot 的全局设置（`data/cmd_config.json` 里的
+> `wake_prefix`），插件改不了。想要 `+nai`，得先把全局前缀设成 `+`，插件里仍填 `nai`。
+> 命令名里不能有空格。
 
 **指定图片尺寸** — 在提示词前面加尺寸关键词：
 
@@ -127,11 +176,36 @@ AI → 自动调用 nai_generate 生成图片
 
 > 不写 `--seed` 则每次随机。
 
-**组合使用** — 尺寸、预设、负面提示词、种子可以随意组合：
+**组合使用** — 尺寸、预设、模型、负面提示词、种子可以随意组合：
 
 ```
-/nai 2K竖图 -p GalGame风 1girl --negative low quality --seed 42
+/nai 2K竖图 -p GalGame风 -m 5 一个女孩 --negative low quality --seed 42
 ```
+
+**直译模型配置**
+
+默认（`translate_mode = astrbot`）不用配任何东西：插件会**自动发现** AstrBot 里已配置的对话模型，
+挨个试，谁先成功用谁。也可以手动指定、并配多个做轮询：
+
+```
+translate_provider_ids = 模型ID1, 模型ID2
+```
+
+如果想彻底绕开 AstrBot、单独用一个 OpenAI 兼容接口来翻译：
+
+```
+translate_mode = openai
+translate_openai_models =
+https://api.openai.com/v1|sk-xxxx|gpt-4o-mini
+https://dashscope.aliyuncs.com/compatible-mode/v1|sk-yyyy|qwen-plus
+```
+
+> - 每行格式 `base_url|api_key|model`，`api_key` 可以留空
+> - **轮询**：前一个失败（超时/限流/欠费/返回空）就自动换下一个，全部失败才报错
+> - 成功的模型会被记住，下次优先使用
+> - 翻译失败时怎么办由 `translate_on_error` 决定：
+>   - `fallback`（默认）：用原文继续生图，并提示一句
+>   - `abort`：直接终止，避免翻译失败还白白扣点
 
 **预设管理**
 
@@ -139,6 +213,7 @@ AI → 自动调用 nai_generate 生成图片
 /nai presets                              查看所有预设（也可用 /nai 预设）
 /nai presets <预设名>                      查看单个预设详情（也可用 /nai 预设 <预设名>）
 /nai save 我的预设 best quality, detailed  保存自定义预设（也可用 /nai 保存）
+/nai update 我的预设 best quality, masterpiece  修改自定义预设（也可用 /nai 修改）
 /nai del 我的预设                          删除自定义预设（也可用 /nai 删除）
 ```
 
@@ -295,12 +370,13 @@ AI：来啦，正在用 AI 画笔创作... 🖌️
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `prompt` | string | 是 | 英文关键词提示词，逗号分隔 |
+| `prompt` | string | 是 | 图片描述，**中文或英文都可以**（会自动直译为英文标签） |
 | `size` | string | 否 | 尺寸，如"竖图"、"横图"、"2K竖图"等 |
 | `artist` | string | 否 | 质量前缀/画师串，如"best quality, absurdres" |
 | `negative` | string | 否 | 负面提示词，留空用默认 |
 | `preset` | string | 否 | 预设名称，如"高质量"、"动漫风"、"GalGame风" |
 | `seed` | int | 否 | 随机种子，0 表示自动随机 |
+| `model` | string | 否 | 模型，如"5"、"4.5"、"furry"，留空用默认 |
 
 **参数优先级**：`artist` > `preset` > 默认（2.5D唯美风）
 
@@ -343,13 +419,14 @@ AI：来啦，正在用 AI 画笔创作... 🖌️
 
 ```
 astrbot_plugin_nai2api/
-├── main.py                 # 插件入口，/nai 指令和 LLM Tool 注册
+├── main.py                 # 插件入口，命令注册和 LLM Tool 注册
 ├── metadata.yaml           # 插件元数据
 ├── _conf_schema.json       # 配置 Schema
 ├── requirements.txt        # 依赖声明
 ├── README.md               # 本文件
 ├── core/
-│   ├── nai2api_client.py   # Nai2API 客户端（/generate 请求）
+│   ├── nai2api_client.py   # Nai2API 客户端（/generate 请求、扣点计算）
+│   ├── translate_manager.py # 提示词直译（AstrBot 模型 / OpenAI 兼容接口，支持轮询）
 │   ├── image_manager.py    # 图片保存和缓存管理
 │   └── preset_manager.py   # 预设加载和保存
 └── persona/

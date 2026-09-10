@@ -28,8 +28,10 @@ from .core.nai2api_client import (
     COST_4K,
     is_v5_model,
     get_generation_cost,
+    resolve_model_alias,
 )
 from .core.preset_manager import PresetManager
+from .core.translate_manager import TranslateManager, TranslateError
 
 # 解析用户输入中的尺寸前缀、-p/--preset、--artist 和 --negative 参数
 _SIZE_PATTERN = re.compile(
@@ -37,45 +39,61 @@ _SIZE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _PRESET_PATTERN = re.compile(r'(?:-p|--preset)\s+(\S+)', re.IGNORECASE)
+_MODEL_PATTERN = re.compile(r'(?:-m|--model)\s+(\S+)', re.IGNORECASE)
 _SEED_PATTERN = re.compile(r'--seed\s+(\d+)', re.IGNORECASE)
-_ARTIST_PATTERN = re.compile(r'--artist\s+(.+?)(?=\s+(?:--negative|-p|--preset|--seed)\s+|$)', re.DOTALL)
-_NEGATIVE_PATTERN = re.compile(r'--negative\s+(.+?)(?=\s+(?:--artist|-p|--preset|--seed)\s+|$)', re.DOTALL)
+_ARTIST_PATTERN = re.compile(
+    r'--artist\s+(.+?)(?=\s+(?:--negative|-p|--preset|-m|--model|--seed)\s+|$)', re.DOTALL
+)
+_NEGATIVE_PATTERN = re.compile(
+    r'--negative\s+(.+?)(?=\s+(?:--artist|-p|--preset|-m|--model|--seed)\s+|$)', re.DOTALL
+)
 
 
 HELP_TEXT = (
-    "用法: /nai [尺寸] <提示词> [-p <预设>] [--artist <质量前缀>] [--negative <负面提示词>] [--seed <种子>]\n"
-    "预设: /nai presets(预设) | /nai save(保存) <名称> <质量前缀> | /nai update(修改) <名称> <新前缀> | /nai del(删除) <名称>\n"
-    "余额: /nai balance(余额/点数/次数)\n"
-    "尺寸: 竖图|横图|方图|2K竖图|2K横图|2K方图|4K竖图|4K横图|4K方图\n\n"
+    "用法: /{cmd} [尺寸] <提示词> [-p <预设>] [-m <模型>] [--artist <质量前缀>] [--negative <负面>] [--seed <种子>]\n"
+    "预设: /{cmd} presets(预设) | /{cmd} save(保存) <名称> <质量前缀> | /{cmd} update(修改) <名称> <新前缀> | /{cmd} del(删除) <名称>\n"
+    "余额: /{cmd} balance(余额/点数/次数)\n"
+    "尺寸: 竖图|横图|方图|2K竖图|2K横图|2K方图|4K竖图|4K横图|4K方图\n"
+    "模型: 5(V5) | 4.5 | 4 | 3 | furry | 2 | safe   —— 也可写全名 nai-diffusion-5-full\n\n"
     "扣点说明:\n"
     "  V4.5 普通尺寸 = 1 点    V5 普通尺寸 = 5 点\n"
     "  2K = 15 点              4K = 25 点\n"
     "  高扣点会先让你确认一次，避免误扣\n\n"
+    "中文/英文提示词都会自动直译成英文标签再生成\n\n"
     "示例:\n"
-    "  /nai 1girl, silver hair\n"
-    "  /nai -p 高质量 1girl, silver hair\n"
-    "  /nai 2K竖图 -p 动漫风 1girl, silver hair\n"
-    "  /nai 1girl --artist best quality, absurdres\n"
-    "  /nai 1girl --negative bad anatomy, bad hands\n"
-    "  /nai 1girl --seed 12345\n"
-    "  /nai save 我的预设 best quality, absurdres, detailed\n"
-    "  /nai 保存 我的预设 best quality, absurdres, detailed\n"
-    "  /nai update 我的预设 best quality, masterpiece\n"
-    "  /nai 修改 我的预设 best quality, masterpiece\n"
-    "  /nai del 我的预设\n"
-    "  /nai 删除 我的预设\n"
-    "  /nai balance"
+    "  /{cmd} 1girl, silver hair\n"
+    "  /{cmd} 一个银发女孩                          (中文直接写，自动翻译)\n"
+    "  /{cmd} -m 5 -p 动漫风 1girl, silver hair     (用 V5 + 动漫风预设)\n"
+    "  /{cmd} -p 高质量 1girl, silver hair\n"
+    "  /{cmd} 2K竖图 -p 动漫风 1girl, silver hair\n"
+    "  /{cmd} 1girl --artist best quality, absurdres\n"
+    "  /{cmd} 1girl --negative bad anatomy, bad hands\n"
+    "  /{cmd} 1girl --seed 12345\n"
+    "  /{cmd} save 我的预设 best quality, absurdres, detailed\n"
+    "  /{cmd} 保存 我的预设 best quality, absurdres, detailed\n"
+    "  /{cmd} update 我的预设 best quality, masterpiece\n"
+    "  /{cmd} 修改 我的预设 best quality, masterpiece\n"
+    "  /{cmd} del 我的预设\n"
+    "  /{cmd} 删除 我的预设\n"
+    "  /{cmd} balance"
 )
 
 
-def _parse_nai_command(text: str) -> tuple[str | None, str, str | None, str | None, str | None, int | None]:
+def _parse_nai_command(text: str) -> tuple[
+    str | None, str, str | None, str | None, str | None, int | None, str | None
+]:
     """
     解析 /nai 指令的参数。
 
-    格式: /nai [尺寸] <提示词> [-p <预设>] [--artist <质量前缀>] [--negative <负面提示词>] [--seed <种子>]
+    格式:
+        /nai [尺寸] <提示词> [-p <预设>] [-m <模型>] [--artist <质量前缀>]
+             [--negative <负面提示词>] [--seed <种子>]
+
+    参数顺序可以任意，但 --artist / --negative 的值会一直读到下一个
+    "参数名"为止，所以这两个建议写在最后。
 
     Returns:
-        (size, prompt, preset_name, artist, negative, seed)
+        (size, prompt, preset_name, artist, negative, seed, model)
     """
     text = text.strip()
     size = None
@@ -85,6 +103,13 @@ def _parse_nai_command(text: str) -> tuple[str | None, str, str | None, str | No
     if m:
         size = m.group(1)
         text = text[m.end():]
+
+    # 提取模型（-m / --model），支持简写如 "5"、"4.5"
+    model = None
+    m = _MODEL_PATTERN.search(text)
+    if m:
+        model = resolve_model_alias(m.group(1))
+        text = text[:m.start()] + text[m.end():]
 
     # 提取预设名
     preset_name = None
@@ -115,7 +140,43 @@ def _parse_nai_command(text: str) -> tuple[str | None, str, str | None, str | No
         text = text[:m.start()] + text[m.end():]
 
     prompt = text.strip()
-    return size, prompt, preset_name, artist, negative, seed
+    return size, prompt, preset_name, artist, negative, seed, model
+
+
+def _parse_command_names(value) -> list[str]:
+    """解析自定义命令名配置。
+
+    支持 "nai" 或 "nai,niu,绘" 这种写法（中英文逗号、分号、换行都行）。
+    第一项是主命令名，其余作为别名。全部非法时回退到 "nai"。
+
+    注意：命令名里不能有空格（AstrBot 的命令匹配不支持）。
+    """
+    if value is None:
+        return ["nai"]
+    if isinstance(value, (list, tuple, set)):
+        raw = [str(v) for v in value]
+    else:
+        text = str(value).replace("，", ",").replace("；", ",").replace(";", ",")
+        raw = text.replace("\n", ",").split(",")
+
+    names: list[str] = []
+    for item in raw:
+        name = item.strip().lstrip("/").lstrip("+")  # 允许用户顺手写 /nai 或 +nai
+        if not name or " " in name:
+            continue
+        if name not in names:
+            names.append(name)
+
+    return names or ["nai"]
+
+
+def _cmd(name: str, alias: set[str] | None = None):
+    """动态注册命令。
+
+    命令名来自配置，只能在 __init__ 之后注册，所以这里包一层。
+    好处是不管配的什么名字，都能同时拿到命令别名。
+    """
+    return filter.command(name, alias=alias or set())
 
 
 class Nai2ApiPlugin(Star):
@@ -164,14 +225,109 @@ class Nai2ApiPlugin(Star):
 
         self.presets = PresetManager(self.data_dir)
 
+        # 提示词直译（中文/英文 → 英文标签）
+        self.translator = TranslateManager(config, context)
+        self._translate_enabled = bool(config.get("translate_enabled", True))
+        self._translate_on_error = str(
+            config.get("translate_on_error", "fallback")
+        ).strip().lower()
+
         self._llm_tool_enabled = bool(config.get("llm_tool_enabled", True))
         self._show_image_info = bool(config.get("show_image_info", True))
         self._confirm_hd = bool(config.get("confirm_hd_size", True))
 
+        # 自定义命令名/别名（默认 nai）
+        self.command_names = _parse_command_names(config.get("command_names", "nai"))
+        self.command_name = self.command_names[0]
         # 待确认的生图请求（V5 普通尺寸 / 2K / 4K），key 为会话标识
         self._pending_hd: dict[str, dict] = {}
 
         self._fix_llm_tool_schemas()
+
+        # 注册自定义命令名。
+        # filter.command 是在类定义时（导入阶段）执行的，那时候还读不到用户配置，
+        # 所以配置里的额外名字只能在这里补救：给每个别名动态挂一个同逻辑的处理器。
+        self._register_extra_commands()
+
+    def _register_extra_commands(self) -> None:
+        """把配置里的额外命令名注册成别名。
+
+        为什么要动态注册：`@filter.command("nai")` 是在**模块导入时**执行的，
+        那会儿用户配置还没传进来，所以装饰器里没法写配置里的名字。
+
+        AstrBot 提供了 Context.register_commands()，让插件在 __init__ 里
+        按配置补注册命令，正好解决这个问题。
+
+        注意：命令名改了要重载插件才生效（注册是一次性的）。
+        """
+        extra = [n for n in self.command_names if n != "nai"]
+        if not extra:
+            return
+
+        register = getattr(self.context, "register_commands", None)
+        if not callable(register):
+            logger.warning(
+                "[Nai2API] 当前 AstrBot 版本不支持动态注册命令，"
+                "自定义命令名（%s）未生效，请重载插件或使用默认的 nai",
+                ", ".join(extra),
+            )
+            return
+
+        for name in extra:
+            try:
+                register(
+                    star_name="astrbot_plugin_nai2api",
+                    command_name=name,
+                    desc=f"NovelAI 生图（{name}）",
+                    priority=1,
+                    awaitable=self._make_command_handler(name),
+                )
+                logger.info("[Nai2API] 已注册自定义命令名: %s", name)
+            except Exception as e:
+                logger.warning("[Nai2API] 注册自定义命令名 '%s' 失败: %s", name, e)
+
+    def _make_command_handler(self, name: str):
+        """为指定命令名生成一个转调 _handle_generate_command 的处理器"""
+        plugin = self
+
+        async def _handler(event: AstrMessageEvent, args: GreedyStr):
+            return await plugin._handle_generate_command(event, args)
+
+        # register_commands 用 __module__ + __name__ 做唯一键，重名会互相覆盖，
+        # 所以这里必须给每个命令名一个不同的函数名
+        _handler.__name__ = f"nai_cmd_{name}"
+        return _handler
+
+    async def _translate_prompt(self, prompt: str, event: AstrMessageEvent) -> tuple[str | None, str | None]:
+        """把提示词直译成英文标签。
+
+        Returns:
+            (翻译后的提示词, 错误提示)。成功时第二个值为 None；
+            失败且策略为 fallback 时返回原文 + 错误提示。
+        """
+        if not self._translate_enabled or not prompt.strip():
+            return prompt, None
+
+        try:
+            translated = await self.translator.translate(prompt)
+            if translated:
+                if translated.strip() != prompt.strip():
+                    logger.info("[Nai2API] 提示词已直译: %s → %s", prompt[:60], translated[:60])
+                return translated, None
+            return prompt, None
+
+        except TranslateError as e:
+            logger.error("[Nai2API] 提示词直译失败: %s", e)
+            if self._translate_on_error == "fallback":
+                # 回退到原文继续生图，但提醒用户
+                return prompt, f"⚠️ 直译模型不可用，本次直接用原文生图。\n原因：{e}"
+            return None, f"❌ 直译失败，已中止生图。\n原因：{e}"
+
+        except Exception as e:
+            logger.error("[Nai2API] 直译出现异常: %s", e)
+            if self._translate_on_error == "fallback":
+                return prompt, f"⚠️ 直译出错，本次直接用原文生图：{e}"
+            return None, f"❌ 直译出错，已中止生图：{e}"
 
     def _resolve_confirm(self, size: str | None, model: str | None = None) -> tuple[str, int] | None:
         """检查本次生成是否需要用户二次确认（防止高扣点被误触发）。
@@ -180,6 +336,10 @@ class Nai2ApiPlugin(Star):
         1. V5 模型用普通尺寸 —— 普通图不是 1 点而是 5 点，很多人不知道
         2. 2K / 4K 尺寸 —— 15 / 25 点
 
+        Args:
+            size: 用户指定的尺寸（可为空）
+            model: 本次实际使用的模型（-m 参数或配置的默认模型）
+
         Returns:
             None            —— 不需要确认（扣点低，或用户关掉了确认功能）
             (原因文案, 点数) —— 需要确认，以及本来要扣的点数
@@ -187,7 +347,7 @@ class Nai2ApiPlugin(Star):
         if not self._confirm_hd:
             return None
 
-        final_model = self.client.default_model
+        final_model = (model or "").strip() or self.client.default_model
         final_size = self.client.resolve_size(size)
         cost = get_generation_cost(final_model, final_size)
 
@@ -254,15 +414,34 @@ class Nai2ApiPlugin(Star):
         )
         return event.chain_result([node])
 
-    async def _send_image_with_info(self, event: AstrMessageEvent, image_path: Path, preset_name: str | None, elapsed: float):
+    async def _send_image_with_info(
+        self, event: AstrMessageEvent, image_path: Path,
+        preset_name: str | None, elapsed: float, model: str | None = None,
+    ):
         """发送图片+信息标签"""
         # 先发图片
         await event.send(event.image_result(str(image_path)))
 
         # 如果开启了信息标签，则发送标签
         if self._show_image_info:
-            info_text = f"{preset_name or '默认'} | 耗时{int(elapsed)}秒"
-            await event.send(event.plain_result(info_text))
+            await event.send(event.plain_result(
+                self._build_info_label(preset_name, elapsed, model)
+            ))
+
+    def _build_info_label(
+        self, preset_name: str | None, elapsed: float, model: str | None = None
+    ) -> str:
+        """构造信息标签文本，名称超长时截断（防止长串画师串刷屏）"""
+        name = (preset_name or "默认").strip()
+        if "," in name or len(name) > 40:
+            # 预设名里带逗号说明用户直接写了画师串，只显示简短标识
+            name = "自定义画师串"
+        label = f"{name} | 耗时{int(elapsed)}秒"
+        if model:
+            # 模型名很长（nai-diffusion-5-full），简写成 v5 / v4.5 更好读
+            short = model.replace("nai-diffusion-", "v").replace("-full", "").replace("-curated", "c")
+            label = f"{label} | {short}"
+        return label
 
     async def _do_generate(
         self,
@@ -271,24 +450,33 @@ class Nai2ApiPlugin(Star):
         artist: str | None = None,
         negative: str | None = None,
         seed: int | None = None,
+        model: str | None = None,
     ) -> Path:
         """执行生图并返回本地图片路径"""
         image_bytes = await self.client.generate(
-            prompt, size=size, artist=artist, negative=negative, seed=seed
+            prompt, size=size, artist=artist, negative=negative, seed=seed, model=model
         )
         return await self.imgr.save_image(image_bytes)
 
-    @filter.command("nai")
+    @_cmd("nai", {"nai"})
     async def nai_generate(self, event: AstrMessageEvent, args: GreedyStr):
         """NovelAI 生图
 
-        用法: /nai [尺寸] <提示词> [-p <预设>] [--artist <质量前缀>] [--negative <负面提示词>] [--seed <种子>]
+        用法: /nai [尺寸] <提示词> [-p <预设>] [-m <模型>] [--artist <质量前缀>] [--negative <负面>] [--seed <种子>]
               /nai presets | /nai 预设  →  查看所有预设
               /nai save <名称> <质量前缀>  →  保存自定义预设
               /nai update <名称> <新的质量前缀>  →  修改自定义预设
               /nai del <名称>  →  删除自定义预设
         """
-        # 注意：AstrBot 的 filter.command 已经把 wake_prefix（如 "/"）和 "nai" 前缀去除
+        return await self._handle_generate_command(event, args)
+
+    async def _handle_generate_command(self, event: AstrMessageEvent, args: GreedyStr):
+        """命令主流程。
+
+        抽成独立方法，是为了让自定义命令名注册的别名也能复用它
+        （别名走的是同一套逻辑，不然就得复制一份代码）。
+        """
+        # 注意：AstrBot 的 filter.command 已经把 wake_prefix（如 "/"）和命令名去除
         # 因此 args 就是命令后的完整原始文本，不需要再去除前缀
         args = args.strip() if args else ""
 
@@ -318,14 +506,14 @@ class Nai2ApiPlugin(Star):
 
         # 无参数时显示帮助
         if not args:
-            return event.plain_result(HELP_TEXT)
+            return event.plain_result(HELP_TEXT.format(cmd=self.command_name))
 
         # 二次确认：用户回复"确认"/"取消"时处理上一次挂起的生图
         handled, reply = await self._handle_pending_confirm(event, args)
         if handled:
             return reply
 
-        size, prompt, preset_name, artist, negative, seed = _parse_nai_command(args)
+        size, prompt, preset_name, artist, negative, seed, model = _parse_nai_command(args)
 
         if not prompt:
             return event.plain_result("提示词不能为空")
@@ -335,10 +523,18 @@ class Nai2ApiPlugin(Star):
 
         # 预设不存在时提示
         if preset_name and self.presets.get(preset_name) is None and artist is None:
-            return event.plain_result(f"预设 '{preset_name}' 不存在，使用 /nai presets 查看可用预设")
+            return event.plain_result(f"预设 '{preset_name}' 不存在，使用 /nai presets(预设) 查看可用预设")
+
+        # 直译：中文/英文描述 → 英文标签
+        # 注意放在扣点确认之前，这样确认提示里显示的是最终会送出去的提示词
+        translated, trans_err = await self._translate_prompt(prompt, event)
+        if translated is None:
+            # 直译失败且策略为"中止"
+            return event.plain_result(trans_err or "直译失败")
+        prompt = translated
 
         # 高扣点（V5 普通尺寸 / 2K / 4K）需要二次确认，避免误扣点数
-        need_confirm = self._resolve_confirm(size)
+        need_confirm = self._resolve_confirm(size, model)
         if need_confirm:
             reason, cost = need_confirm
             self._pending_hd[event.unified_msg_origin] = {
@@ -349,14 +545,22 @@ class Nai2ApiPlugin(Star):
                 "negative": negative,
                 "seed": seed,
                 "preset": preset_name,
+                "model": model,
             }
-            return event.plain_result(
-                f"⚠️ 本次使用{reason}，将消耗 {cost} 点（普通尺寸的 V4.5 模型只扣 1 点）。\n"
+            msg = (
+                f"⚠️ 本次使用{reason}，将消耗 {cost} 点"
+                f"（普通尺寸的 V4.5 模型只扣 1 点）。\n"
                 f"确定要生成吗？10 分钟内回复「确认」继续，回复「取消」放弃。"
             )
+            if trans_err:
+                msg = f"{trans_err}\n\n{msg}"
+            return event.plain_result(msg)
+
+        if trans_err:
+            await event.send(event.plain_result(trans_err))
 
         return await self._run_generate_command(
-            event, prompt, size, final_artist, negative, seed, preset_name
+            event, prompt, size, final_artist, negative, seed, preset_name, model
         )
 
     async def _run_generate_command(
@@ -368,23 +572,27 @@ class Nai2ApiPlugin(Star):
         negative: str | None,
         seed: int | None,
         preset_name: str | None,
+        model: str | None = None,
     ):
         """真正执行指令生图并发送结果"""
         start = time.time()
         try:
             image_path = await self._do_generate(
-                prompt, size=size, artist=artist, negative=negative, seed=seed
+                prompt, size=size, artist=artist, negative=negative,
+                seed=seed, model=model,
             )
             elapsed = time.time() - start
-            await self._send_image_with_info(event, image_path, preset_name, elapsed)
+            await self._send_image_with_info(event, image_path, preset_name, elapsed, model)
             return None
         except Exception as e:
             logger.error("[Nai2API] 生图失败: %s", e)
             # 失败时也显示信息标签
             if self._show_image_info:
                 elapsed = time.time() - start
-                reason = str(e)[:20] if str(e) else "未知错误"
-                info_text = f"{preset_name or '默认'} | 耗时{int(elapsed)}秒\n失败原因：{reason}"
+                reason = str(e)[:50] if str(e) else "未知错误"
+                info_text = (
+                    f"{self._build_info_label(preset_name, elapsed, model)}\n失败原因：{reason}"
+                )
                 return event.plain_result(info_text)
             return event.plain_result(f"生图失败: {e}")
 
@@ -418,6 +626,7 @@ class Nai2ApiPlugin(Star):
                 pending["negative"],
                 pending["seed"],
                 pending["preset"],
+                pending.get("model"),
             )
 
         if args in self._CANCEL_WORDS:
@@ -579,16 +788,18 @@ class Nai2ApiPlugin(Star):
         negative: str = "",
         preset: str = "",
         seed: str = "0",
+        model: str = "",
     ):
         """使用 NovelAI 生成图片。
 
         Args:
-            prompt(string): 图片提示词，例如 "1girl, silver hair, blue eyes"
+            prompt(string): 图片提示词。中文或英文都可以，插件会自动直译为 NovelAI 可识别的英文标签
             size(string): 图片尺寸，可选 "竖图"、"横图"、"方图"、"2K竖图" 等，留空使用默认
             artist(string): 质量前缀或画师串，例如 "best quality, absurdres"，留空使用默认或预设
             negative(string): 负面提示词，留空使用默认
             preset(string): 预设名称，例如 "高质量"、"动漫风"，留空使用默认
             seed(string): 随机种子，数字字符串，"0" 表示自动随机，相同种子可复现图片
+            model(string): 模型，可选 "5"（V5，普通图 5 点）、"4.5"（V4.5，普通图 1 点）等，留空用默认
         """
         if not self._llm_tool_enabled:
             return mcp.types.CallToolResult(
@@ -600,8 +811,21 @@ class Nai2ApiPlugin(Star):
                 content=[mcp.types.TextContent(type="text", text="提示词不能为空")]
             )
 
+        # 直译：中文/英文都交给翻译模型转成英文 NovelAI 标签
+        translated, trans_err = await self._translate_prompt(prompt.strip(), event)
+        if translated is None:
+            return mcp.types.CallToolResult(
+                content=[mcp.types.TextContent(
+                    type="text", text=f"提示词直译失败，未生成图片。{trans_err or ''}"
+                )]
+            )
+        prompt_en = translated
+
+        # 模型别名解析（"5"、"4.5"、"v5" 等）
+        final_model = resolve_model_alias(model.strip()) if model.strip() else None
+
         # 高扣点（V5 普通尺寸 / 2K / 4K）需要二次确认：LLM 不直接生图，改为提示用户
-        need_confirm = self._resolve_confirm(size.strip() or None)
+        need_confirm = self._resolve_confirm(size.strip() or None, final_model)
         if need_confirm:
             reason, cost = need_confirm
             result_text = (
@@ -629,20 +853,23 @@ class Nai2ApiPlugin(Star):
 
             start = time.time()
             image_path = await self._do_generate(
-                prompt.strip(),
+                prompt_en,
                 size=size.strip() or None,
                 artist=final_artist,
                 negative=negative.strip() or None,
                 seed=final_seed,
+                model=final_model,
             )
             elapsed = time.time() - start
 
-            await self._send_image_with_info(event, image_path, preset.strip() or None, elapsed)
+            await self._send_image_with_info(
+                event, image_path, preset.strip() or None, elapsed, final_model
+            )
 
             return mcp.types.CallToolResult(
                 content=[mcp.types.TextContent(
                     type="text",
-                    text=f"图片已生成并发送给用户。提示词: {prompt.strip()[:100]}"
+                    text=f"图片已生成并发送给用户。英文提示词: {prompt_en[:100]}"
                 )]
             )
         except Exception as e:
@@ -650,8 +877,11 @@ class Nai2ApiPlugin(Star):
             # 失败时也显示信息标签
             if self._show_image_info:
                 elapsed = time.time() - start
-                reason = str(e)[:20] if str(e) else "未知错误"
-                info_text = f"{preset.strip() or '默认'} | 耗时{int(elapsed)}秒\n失败原因：{reason}"
+                reason = str(e)[:50] if str(e) else "未知错误"
+                info_text = (
+                    f"{self._build_info_label(preset.strip() or None, elapsed, final_model)}\n"
+                    f"失败原因：{reason}"
+                )
                 await event.send(event.plain_result(info_text))
             return mcp.types.CallToolResult(
                 content=[mcp.types.TextContent(type="text", text=f"生图失败: {e}")]

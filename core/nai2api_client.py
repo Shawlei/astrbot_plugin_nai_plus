@@ -81,6 +81,47 @@ def is_v5_model(model: str | None) -> bool:
     return name in V5_MODELS or name.startswith("nai-diffusion-5")
 
 
+# 模型简写 → 完整模型名
+# 让用户可以用 /nai -m 5 这种短写法，不用打一长串
+MODEL_ALIASES = {
+    "5": MODEL_V5_FULL,
+    "5full": MODEL_V5_FULL,
+    "5-full": MODEL_V5_FULL,
+    "v5": MODEL_V5_FULL,
+    "5c": MODEL_V5_CURATED,
+    "5curated": MODEL_V5_CURATED,
+    "5-curated": MODEL_V5_CURATED,
+    "4.5": "nai-diffusion-4-5-full",
+    "4.5full": "nai-diffusion-4-5-full",
+    "45": "nai-diffusion-4-5-full",
+    "v4.5": "nai-diffusion-4-5-full",
+    "4.5c": "nai-diffusion-4-5-curated",
+    "4.5curated": "nai-diffusion-4-5-curated",
+    "4": "nai-diffusion-4-full",
+    "v4": "nai-diffusion-4-full",
+    "3": "nai-diffusion-3",
+    "v3": "nai-diffusion-3",
+    "furry": "nai-diffusion-furry-3",
+    "2": "nai-diffusion-2",
+    "v2": "nai-diffusion-2",
+    "safe": "safe-diffusion",
+}
+
+
+def resolve_model_alias(value: str | None) -> str | None:
+    """把 -m 参数解析成完整模型名。
+
+    支持简写（5、4.5、5c...）和完整名（nai-diffusion-5-full）。
+    认不出来时原样返回，交给网关去报错，不擅自替换成默认值。
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return MODEL_ALIASES.get(text.lower(), text)
+
+
 def get_generation_cost(model: str | None, size: str | None) -> int:
     """计算一次生成要扣多少点。
 
