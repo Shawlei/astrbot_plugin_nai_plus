@@ -42,6 +42,62 @@ VALID_SIZES = {
     "4K竖图", "4K横图", "4K方图",
 }
 
+# ---------------------------------------------------------------------------
+# 模型与扣点
+#
+# 重要：Nai2API 的扣点是「模型 + 尺寸」两个维度共同决定的，不是只看尺寸。
+# 官方规则（来源：Nai2API README）：
+#   V4.5 Full  普通图 1 点，2K 15 点，4K 25 点
+#   V5   Full  普通图 5 点，2K 15 点，4K 25 点   ← 注意 V5 普通图就是 5 点
+# 所以「用普通尺寸」并不等于「只花 1 点」，选 V5 时普通图也会贵 5 倍。
+# ---------------------------------------------------------------------------
+
+# NovelAI V5 系列模型（2026-08 上线）
+MODEL_V5_FULL = "nai-diffusion-5-full"
+MODEL_V5_CURATED = "nai-diffusion-5-curated"
+
+# 所有 V5 模型，用于判断扣点和是否触发确认
+V5_MODELS = {MODEL_V5_FULL, MODEL_V5_CURATED}
+
+# 普通尺寸的扣点：按模型区分
+COST_NORMAL_V45 = 1
+COST_NORMAL_V5 = 5
+# 高清尺寸的扣点：V4.5 / V5 一致
+COST_2K = 15
+COST_4K = 25
+
+# 2K / 4K 尺寸前缀，用于从尺寸名推断档位
+_HD_PREFIXES = (
+    ("4K", COST_4K),
+    ("2K", COST_2K),
+)
+
+
+def is_v5_model(model: str | None) -> bool:
+    """判断是否为 V5 系列模型（含 5-curated 等变体）"""
+    if not model:
+        return False
+    name = str(model).strip().lower()
+    return name in V5_MODELS or name.startswith("nai-diffusion-5")
+
+
+def get_generation_cost(model: str | None, size: str | None) -> int:
+    """计算一次生成要扣多少点。
+
+    与 Nai2API 官方规则保持一致：
+    - 4K 尺寸：25 点
+    - 2K 尺寸：15 点
+    - 普通尺寸：V5 模型 5 点，其他模型 1 点
+
+    注意：尺寸名要用归一化后的值（如 "2K竖图"）才能正确识别档位。
+    """
+    text = str(size).strip() if size else ""
+    for prefix, cost in _HD_PREFIXES:
+        if text.startswith(prefix):
+            return cost
+    return COST_NORMAL_V5 if is_v5_model(model) else COST_NORMAL_V45
+
+
 # Nai2API 官方默认 artist（2.5D唯美风，来自 store.js defaultArtist2_5D）
 DEFAULT_ARTIST = "0.9::misaka_12003-gou ::, dino_(dinoartforame), wanke, liduke, year 2025, realistic, 4k, -2::green ::, textless version, The image is highly intricate finished drawn. Only the character's face is in anime style, but their body is in realistic style. 1.35::A highly finished photo-style artwork that has lively color, graphic texture, realistic skin surface, and lifelike flesh with little obliques::. 1.63::photorealistic::, 1.63::photo(medium)::, \\n20::best quality, absurdres, very aesthetic, detailed, masterpiece::,, very aesthetic, masterpiece, no text,"
 DEFAULT_NEGATIVE = (
@@ -144,6 +200,13 @@ class Nai2ApiClient:
             logger.warning("[Nai2API] 2K 已禁用，'%s' 降级为 '%s'", mapped, downgraded)
             return downgraded
         return mapped
+
+    def resolve_size(self, size: str | None) -> str:
+        """对外暴露的尺寸归一化（含 2K/4K 降级），用于生成前预估扣点。
+
+        与 generate() 内部使用的是同一套逻辑，所以预估结果和真实扣费一致。
+        """
+        return self._normalize_size(size)
 
     async def generate(
         self,

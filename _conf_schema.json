@@ -14,14 +14,14 @@
   },
   "default_model": {
     "description": "默认模型",
-    "hint": "NovelAI 模型名称",
+    "hint": "NovelAI 模型名称。V5 系列普通图扣 5 点，V4.5 系列普通图扣 1 点；2K/4K 两者都是 15/25 点",
     "type": "string",
-    "options": ["nai-diffusion-4-5-full", "nai-diffusion-4-full", "nai-diffusion-3", "nai-diffusion-furry-3", "nai-diffusion-2", "safe-diffusion"],
-    "default": "nai-diffusion-4-5-full"
+    "options": ["nai-diffusion-5-full", "nai-diffusion-5-curated", "nai-diffusion-4-5-full", "nai-diffusion-4-5-curated", "nai-diffusion-4-full", "nai-diffusion-3", "nai-diffusion-furry-3", "nai-diffusion-2", "safe-diffusion"],
+    "default": "nai-diffusion-5-full"
   },
   "default_size": {
     "description": "默认图片尺寸",
-    "hint": "普通=1点，2K=15点，4K=25点",
+    "hint": "普通=V4.5 扣1点/V5 扣5点，2K=15点，4K=25点",
     "type": "string",
     "options": ["竖图", "横图", "方图", "2K竖图", "2K横图", "2K方图", "4K竖图", "4K横图", "4K方图"],
     "default": "竖图"
@@ -103,6 +103,12 @@
   "show_image_info": {
     "description": "图片信息标签",
     "hint": "开启后在图片下方显示预设名和耗时",
+    "type": "bool",
+    "default": true
+  },
+  "confirm_hd_size": {
+    "description": "高扣点生图二次确认",
+    "hint": "开启后，2K(15点)/4K(25点) 以及 V5 模型的普通尺寸(5点) 会先询问确认再生成，防止误扣",
     "type": "bool",
     "default": true
   },

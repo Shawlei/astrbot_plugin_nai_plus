@@ -18,7 +18,17 @@ from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.star.filter.command import GreedyStr
 
 from .core.image_manager import ImageManager
-from .core.nai2api_client import Nai2ApiClient, DEFAULT_ARTIST, DEFAULT_NEGATIVE
+from .core.nai2api_client import (
+    Nai2ApiClient,
+    DEFAULT_ARTIST,
+    DEFAULT_NEGATIVE,
+    COST_NORMAL_V45,
+    COST_NORMAL_V5,
+    COST_2K,
+    COST_4K,
+    is_v5_model,
+    get_generation_cost,
+)
 from .core.preset_manager import PresetManager
 
 # 解析用户输入中的尺寸前缀、-p/--preset、--artist 和 --negative 参数
@@ -30,6 +40,32 @@ _PRESET_PATTERN = re.compile(r'(?:-p|--preset)\s+(\S+)', re.IGNORECASE)
 _SEED_PATTERN = re.compile(r'--seed\s+(\d+)', re.IGNORECASE)
 _ARTIST_PATTERN = re.compile(r'--artist\s+(.+?)(?=\s+(?:--negative|-p|--preset|--seed)\s+|$)', re.DOTALL)
 _NEGATIVE_PATTERN = re.compile(r'--negative\s+(.+?)(?=\s+(?:--artist|-p|--preset|--seed)\s+|$)', re.DOTALL)
+
+
+HELP_TEXT = (
+    "用法: /nai [尺寸] <提示词> [-p <预设>] [--artist <质量前缀>] [--negative <负面提示词>] [--seed <种子>]\n"
+    "预设: /nai presets(预设) | /nai save(保存) <名称> <质量前缀> | /nai update(修改) <名称> <新前缀> | /nai del(删除) <名称>\n"
+    "余额: /nai balance(余额/点数/次数)\n"
+    "尺寸: 竖图|横图|方图|2K竖图|2K横图|2K方图|4K竖图|4K横图|4K方图\n\n"
+    "扣点说明:\n"
+    "  V4.5 普通尺寸 = 1 点    V5 普通尺寸 = 5 点\n"
+    "  2K = 15 点              4K = 25 点\n"
+    "  高扣点会先让你确认一次，避免误扣\n\n"
+    "示例:\n"
+    "  /nai 1girl, silver hair\n"
+    "  /nai -p 高质量 1girl, silver hair\n"
+    "  /nai 2K竖图 -p 动漫风 1girl, silver hair\n"
+    "  /nai 1girl --artist best quality, absurdres\n"
+    "  /nai 1girl --negative bad anatomy, bad hands\n"
+    "  /nai 1girl --seed 12345\n"
+    "  /nai save 我的预设 best quality, absurdres, detailed\n"
+    "  /nai 保存 我的预设 best quality, absurdres, detailed\n"
+    "  /nai update 我的预设 best quality, masterpiece\n"
+    "  /nai 修改 我的预设 best quality, masterpiece\n"
+    "  /nai del 我的预设\n"
+    "  /nai 删除 我的预设\n"
+    "  /nai balance"
+)
 
 
 def _parse_nai_command(text: str) -> tuple[str | None, str, str | None, str | None, str | None, int | None]:
@@ -85,6 +121,14 @@ def _parse_nai_command(text: str) -> tuple[str | None, str, str | None, str | No
 class Nai2ApiPlugin(Star):
     """Nai2API 生图插件"""
 
+    # 二次确认的有效期（秒）
+    _HD_CONFIRM_TTL = 600
+
+    # 视为"确认"的回复
+    _CONFIRM_WORDS = ("确认", "确定", "是", "好的", "yes", "y", "ok")
+    # 视为"取消"的回复
+    _CANCEL_WORDS = ("取消", "不生成", "算了", "不要", "no", "n")
+
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
@@ -122,8 +166,42 @@ class Nai2ApiPlugin(Star):
 
         self._llm_tool_enabled = bool(config.get("llm_tool_enabled", True))
         self._show_image_info = bool(config.get("show_image_info", True))
+        self._confirm_hd = bool(config.get("confirm_hd_size", True))
+
+        # 待确认的生图请求（V5 普通尺寸 / 2K / 4K），key 为会话标识
+        self._pending_hd: dict[str, dict] = {}
 
         self._fix_llm_tool_schemas()
+
+    def _resolve_confirm(self, size: str | None, model: str | None = None) -> tuple[str, int] | None:
+        """检查本次生成是否需要用户二次确认（防止高扣点被误触发）。
+
+        需要确认的两种情况：
+        1. V5 模型用普通尺寸 —— 普通图不是 1 点而是 5 点，很多人不知道
+        2. 2K / 4K 尺寸 —— 15 / 25 点
+
+        Returns:
+            None            —— 不需要确认（扣点低，或用户关掉了确认功能）
+            (原因文案, 点数) —— 需要确认，以及本来要扣的点数
+        """
+        if not self._confirm_hd:
+            return None
+
+        final_model = self.client.default_model
+        final_size = self.client.resolve_size(size)
+        cost = get_generation_cost(final_model, final_size)
+
+        # 已降级成普通尺寸的 2K/4K 不会额外扣点，不需要确认
+        is_hd = final_size.startswith("2K") or final_size.startswith("4K")
+
+        if is_hd:
+            return f"尺寸「{final_size}」", cost
+
+        # 普通尺寸但用了 V5 模型
+        if cost > COST_NORMAL_V45:
+            return f"模型「{final_model}」的普通尺寸", cost
+
+        return None
 
     def _fix_llm_tool_schemas(self):
         """修复 LLM 工具的 JSON Schema，添加 required 字段以兼容 Gemini 等模型。
@@ -240,26 +318,12 @@ class Nai2ApiPlugin(Star):
 
         # 无参数时显示帮助
         if not args:
-            return event.plain_result(
-                "用法: /nai [尺寸] <提示词> [-p <预设>] [--artist <质量前缀>] [--negative <负面提示词>]\n"
-                "预设: /nai presets(预设) | /nai save(保存) <名称> <质量前缀> | /nai update(修改) <名称> <新前缀> | /nai del(删除) <名称>\n"
-                "余额: /nai balance(余额/点数/次数)\n"
-                "尺寸: 竖图|横图|方图|2K竖图|2K横图|2K方图|4K竖图|4K横图|4K方图\n\n"
-                "示例:\n"
-                "  /nai 1girl, silver hair\n"
-                "  /nai -p 高质量 1girl, silver hair\n"
-                "  /nai 2K竖图 -p 动漫风 1girl, silver hair\n"
-                "  /nai 1girl --artist best quality, absurdres\n"
-                "  /nai 1girl --negative bad anatomy, bad hands\n"
-                "  /nai 1girl --seed 12345\n"
-                "  /nai save 我的预设 best quality, absurdres, detailed\n"
-                "  /nai 保存 我的预设 best quality, absurdres, detailed\n"
-                "  /nai update 我的预设 best quality, masterpiece\n"
-                "  /nai 修改 我的预设 best quality, masterpiece\n"
-                "  /nai del 我的预设\n"
-                "  /nai 删除 我的预设\n"
-                "  /nai balance"
-            )
+            return event.plain_result(HELP_TEXT)
+
+        # 二次确认：用户回复"确认"/"取消"时处理上一次挂起的生图
+        handled, reply = await self._handle_pending_confirm(event, args)
+        if handled:
+            return reply
 
         size, prompt, preset_name, artist, negative, seed = _parse_nai_command(args)
 
@@ -273,10 +337,43 @@ class Nai2ApiPlugin(Star):
         if preset_name and self.presets.get(preset_name) is None and artist is None:
             return event.plain_result(f"预设 '{preset_name}' 不存在，使用 /nai presets 查看可用预设")
 
+        # 高扣点（V5 普通尺寸 / 2K / 4K）需要二次确认，避免误扣点数
+        need_confirm = self._resolve_confirm(size)
+        if need_confirm:
+            reason, cost = need_confirm
+            self._pending_hd[event.unified_msg_origin] = {
+                "ts": time.time(),
+                "prompt": prompt,
+                "size": size,
+                "artist": final_artist,
+                "negative": negative,
+                "seed": seed,
+                "preset": preset_name,
+            }
+            return event.plain_result(
+                f"⚠️ 本次使用{reason}，将消耗 {cost} 点（普通尺寸的 V4.5 模型只扣 1 点）。\n"
+                f"确定要生成吗？10 分钟内回复「确认」继续，回复「取消」放弃。"
+            )
+
+        return await self._run_generate_command(
+            event, prompt, size, final_artist, negative, seed, preset_name
+        )
+
+    async def _run_generate_command(
+        self,
+        event: AstrMessageEvent,
+        prompt: str,
+        size: str | None,
+        artist: str | None,
+        negative: str | None,
+        seed: int | None,
+        preset_name: str | None,
+    ):
+        """真正执行指令生图并发送结果"""
+        start = time.time()
         try:
-            start = time.time()
             image_path = await self._do_generate(
-                prompt, size=size, artist=final_artist, negative=negative, seed=seed
+                prompt, size=size, artist=artist, negative=negative, seed=seed
             )
             elapsed = time.time() - start
             await self._send_image_with_info(event, image_path, preset_name, elapsed)
@@ -291,6 +388,46 @@ class Nai2ApiPlugin(Star):
                 return event.plain_result(info_text)
             return event.plain_result(f"生图失败: {e}")
 
+    async def _handle_pending_confirm(self, event: AstrMessageEvent, args: str) -> tuple[bool, object]:
+        """处理高扣点生图的二次确认。
+
+        Returns:
+            (是否已处理, 返回给框架的结果)。未处理时第二个值为 None。
+        """
+        key = event.unified_msg_origin
+        pending = self._pending_hd.get(key)
+        if not pending:
+            return False, None
+
+        # 超过有效期视为过期
+        if time.time() - pending["ts"] > self._HD_CONFIRM_TTL:
+            self._pending_hd.pop(key, None)
+            if args in self._CONFIRM_WORDS or args in self._CANCEL_WORDS:
+                return True, event.plain_result(
+                    "上一次的生图确认已超时（超过 10 分钟），请重新发送指令"
+                )
+            return False, None
+
+        if args in self._CONFIRM_WORDS:
+            self._pending_hd.pop(key, None)
+            return True, await self._run_generate_command(
+                event,
+                pending["prompt"],
+                pending["size"],
+                pending["artist"],
+                pending["negative"],
+                pending["seed"],
+                pending["preset"],
+            )
+
+        if args in self._CANCEL_WORDS:
+            self._pending_hd.pop(key, None)
+            return True, event.plain_result("已取消本次生图，没有消耗点数")
+
+        # 输入了别的内容，放弃这次挂起的确认并正常处理新指令
+        self._pending_hd.pop(key, None)
+        return False, None
+
     async def _handle_balance(self, event: AstrMessageEvent):
         """查询 Nai2API 余额"""
         try:
@@ -299,28 +436,43 @@ class Nai2ApiPlugin(Star):
             enabled = data.get("enabled", True)
             note = data.get("note", "")
 
-            balance_int = int(balance)
-            normal_count = balance_int
-            count_2k = balance_int // 15
-            count_4k = balance_int // 25
-
-            status = "正常" if enabled else "已禁用"
-            lines = [
-                f"剩余点数: {balance_int} 点",
-                f"账号状态: {status}",
-            ]
-            if note:
-                lines.append(f"备注: {note}")
-            lines.append(f"---")
-            lines.append(f"预计可生成:")
-            lines.append(f"  普通尺寸(竖图/横图/方图): ~{normal_count} 张")
-            lines.append(f"  2K尺寸: ~{count_2k} 张")
-            lines.append(f"  4K尺寸: ~{count_4k} 张")
-
-            return self._forward_result(event, "Nai2API 余额查询", "\n".join(lines))
+            return self._forward_result(
+                event, "Nai2API 余额查询", self._build_balance_text(data)
+            )
         except Exception as e:
             logger.error("[Nai2API] 查询余额失败: %s", e)
             return event.plain_result(f"查询余额失败: {e}")
+
+    def _build_balance_text(self, data: dict) -> str:
+        """根据当前配置的模型，算出各个档位还能生成多少张。
+
+        普通尺寸的单价取决于模型（V4.5 = 1 点，V5 = 5 点），
+        所以这里要按实际配置的模型来算，不能一律当成 1 点。
+        """
+        balance_int = int(data.get("balance", 0))
+        enabled = data.get("enabled", True)
+        note = data.get("note", "")
+
+        model = self.client.default_model
+        normal_cost = COST_NORMAL_V5 if is_v5_model(model) else COST_NORMAL_V45
+
+        status = "正常" if enabled else "已禁用"
+        lines = [
+            f"剩余点数: {balance_int} 点",
+            f"账号状态: {status}",
+        ]
+        if note:
+            lines.append(f"备注: {note}")
+        lines.append("---")
+        lines.append(f"当前模型: {model}")
+        lines.append("预计可生成:")
+        lines.append(
+            f"  普通尺寸(竖图/横图/方图): ~{balance_int // normal_cost} 张"
+            f"（每张 {normal_cost} 点）"
+        )
+        lines.append(f"  2K尺寸: ~{balance_int // COST_2K} 张（每张 {COST_2K} 点）")
+        lines.append(f"  4K尺寸: ~{balance_int // COST_4K} 张（每张 {COST_4K} 点）")
+        return "\n".join(lines)
 
     def _handle_presets(self, event: AstrMessageEvent, preset_name: str = ""):
         """处理预设列表 / 查看单个预设"""
@@ -448,6 +600,19 @@ class Nai2ApiPlugin(Star):
                 content=[mcp.types.TextContent(type="text", text="提示词不能为空")]
             )
 
+        # 高扣点（V5 普通尺寸 / 2K / 4K）需要二次确认：LLM 不直接生图，改为提示用户
+        need_confirm = self._resolve_confirm(size.strip() or None)
+        if need_confirm:
+            reason, cost = need_confirm
+            result_text = (
+                f"本次使用{reason}，将消耗 {cost} 点，需要用户确认后才能生成。"
+                f"请告诉用户：在对话中回复「确认」继续，回复「取消」放弃；"
+                f"或者改用普通尺寸的 V4.5 模型（只扣 1 点）。"
+            )
+            return mcp.types.CallToolResult(
+                content=[mcp.types.TextContent(type="text", text=result_text)]
+            )
+
         final_artist = self._resolve_artist(
             preset.strip() or None,
             artist.strip() or None,
@@ -501,29 +666,7 @@ class Nai2ApiPlugin(Star):
         """
         try:
             data = await self.client.get_balance()
-            balance = data.get("balance", 0)
-            enabled = data.get("enabled", True)
-            note = data.get("note", "")
-
-            balance_int = int(balance)
-            normal_count = balance_int
-            count_2k = balance_int // 15
-            count_4k = balance_int // 25
-
-            status = "正常" if enabled else "已禁用"
-            lines = [
-                f"剩余点数: {balance_int} 点",
-                f"账号状态: {status}",
-            ]
-            if note:
-                lines.append(f"备注: {note}")
-            lines.append(f"---")
-            lines.append(f"预计可生成:")
-            lines.append(f"  普通尺寸(竖图/横图/方图): ~{normal_count} 张")
-            lines.append(f"  2K尺寸: ~{count_2k} 张")
-            lines.append(f"  4K尺寸: ~{count_4k} 张")
-
-            result_text = "\n".join(lines)
+            result_text = self._build_balance_text(data)
             await event.send(self._forward_result(event, "Nai2API 余额查询", result_text))
             return mcp.types.CallToolResult(
                 content=[mcp.types.TextContent(type="text", text=result_text)]
