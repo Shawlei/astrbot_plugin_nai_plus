@@ -79,6 +79,10 @@ def _load_json_dict(path: Path) -> dict[str, str]:
         if isinstance(value, dict):
             # 分组结构，展开一层
             for k, v in value.items():
+                # 组内同样要跳过 _comment / _note 之类的说明字段，
+                # 否则它们会被当成真实词条加载进去
+                if k.startswith("_"):
+                    continue
                 if isinstance(v, str) and k:
                     out[k] = v
         elif isinstance(value, str):
