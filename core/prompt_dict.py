@@ -284,6 +284,12 @@ class PromptDictionary:
     def replace_substring(self, text: str) -> tuple[str, int]:
         """子串模式：在整句里做替换
 
+        按词长从长到短替换，避免「黑」抢走「黑猫」的一部分。
+
+        替换时会补一个空格做分隔 —— 否则连写输入比如「鸣潮达尼亚」会变成
+        `wuthering_wavesdenia_(wuthering_waves)`，两个英文标签粘成一坨，
+        模型和 NovelAI 都读不懂。
+
         Returns:
             (替换后的文本, 替换次数)
         """
@@ -293,8 +299,11 @@ class PromptDictionary:
         count = 0
         for zh, en in self._by_length:
             if zh in out:
-                out = out.replace(zh, en)
+                # 前后补空格：既隔开相邻标签，也隔开中文残留
+                out = out.replace(zh, f" {en} ")
                 count += 1
+        # 收敛多余空白（替换会引入连续空格）
+        out = re.sub(r"\s+", " ", out).strip()
         return out, count
 
     def __len__(self) -> int:

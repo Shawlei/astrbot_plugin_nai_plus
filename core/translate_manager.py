@@ -48,8 +48,8 @@ SYSTEM_PROMPT = (
     "no quotes, no code fences, no extra sentences.\n"
     "2. Use tag keywords, not full sentences. "
     "Write 'long hair' not 'she has long hair'.\n"
-    "3. If the input is already English tags, keep them and only normalize/complete them. "
-    "Do NOT rewrite or reorder existing tags unnecessarily.\n"
+    "3. If the input is already English tags, keep them VERBATIM. "
+    "Do not rewrite, reorder, or add anything to them.\n"
     "4. PRESERVE any NovelAI weight syntax exactly as-is, never modify it: "
     "`1.2::tag::`, `{{tag}}`, `[tag]`, `-2::tag::`, `\\n20::tag::`.\n"
     "5. Preserve artist tags such as `artist:name`, `dino_(dinoartforame)` unchanged.\n"
@@ -58,7 +58,16 @@ SYSTEM_PROMPT = (
     "8. Never output Chinese characters in the result.\n"
     "9. If the user asks for a size or other non-visual instruction, ignore it.\n"
     "10. Convert Chinese counters and quantifiers into tags: 双马尾 → twintails, "
-    "两把刀 → holding two swords.\n\n"
+    "两把刀 → holding two swords.\n"
+    "11. NEVER invent details the user did not mention. This is the MOST IMPORTANT rule. "
+    "Do NOT add hair color, eye color, hairstyle, body type, clothing, or pose unless the "
+    "user explicitly said it. If the user names a character you do not recognize, output "
+    "ONLY that character's name as a tag — do NOT guess how the character looks.\n"
+    "12. Do NOT output two tags that mean the same thing. Pick the single most accurate "
+    "one and drop the rest: 泳装 → swimsuit (NOT swimsuit + bikini), 女孩 → 1girl "
+    "(NOT 1girl + female). Near-synonyms stack as extra weight and distort the image.\n"
+    "13. When in doubt, do NOT add a tag. Too few accurate tags is far better than "
+    "extra guessed tags.\n\n"
     "Examples:\n"
     "Input: 白发少女站在樱花树下，回头微笑\n"
     "Output: 1girl, white hair, standing, cherry blossoms, tree, looking back, smile\n\n"
@@ -73,6 +82,12 @@ SYSTEM_PROMPT = (
     "depth of field, 1girl\n\n"
     "Input: 一个女孩抱着猫坐在床上，猫是橘色的\n"
     "Output: 1girl, holding cat, cat, orange cat, sitting, on bed, indoors\n\n"
+    "Input: 战双 比安卡 泳装\n"
+    "Output: bianca_(punishing:_gray_raven), swimsuit\n\n"
+    "Input: 动漫风 熟女 泳装\n"
+    "Output: 1girl, mature female, swimsuit, anime style\n\n"
+    "Input: 鸣潮 达妮娅 泳装\n"
+    "Output: dania_(wuthering_waves), swimsuit\n\n"
     "Output the translated tags in a single line and nothing else."
 )
 
@@ -162,6 +177,33 @@ def _dedup_tags(tags: str) -> str:
         seen.add(key)
         out.append(p)
     return ", ".join(out)
+
+
+# 近义标签组：同一组内只保留一个（保留先出现的那个）。
+# 为什么需要：模型经常把「泳装」翻成 `swimsuit, bikini`，把「女孩」翻成
+# `1girl, female`。在 NovelAI 里近义标签叠加 = 给这个概念额外加权，会让画面
+# 在这个概念上过拟合；更麻烦的是 swimsuit 和 bikini 是**不同款式**，
+# 同时写会让模型在两者之间摇摆，画出来的衣服经常不伦不类。
+# 注意：只处理「确实等价」的，不做语义相近但不同的合并（如 skirt/dress 不并）。
+_SYNONYM_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("swimsuit", "bikini", "one-piece swimsuit", "school swimsuit"),
+    ("1girl", "female", "woman", "girl"),
+    ("1boy", "male", "man", "boy"),
+    ("solo", "1girl, solo"),
+)
+
+
+def _collapse_synonyms(tags: str) -> str:
+    """同一近义组内只保留第一个出现的标签，其余丢弃。"""
+    parts = [p.strip() for p in (tags or "").split(",") if p.strip()]
+    lowered = [p.lower() for p in parts]
+    drop: set[int] = set()
+    for group in _SYNONYM_GROUPS:
+        hit_idx = [i for i, t in enumerate(lowered) if t in group and i not in drop]
+        # 第一个保留，后面的丢掉
+        for i in hit_idx[1:]:
+            drop.add(i)
+    return ", ".join(p for i, p in enumerate(parts) if i not in drop)
 
 
 class TranslateManager:
@@ -297,13 +339,15 @@ class TranslateManager:
         # 已命中的部分要拼回去：顺序上保持「词库结果在前」，
         # 因为用户输入的往往是「白发 双马尾」这类属性词在前、描述在后
         if hits and translated:
-            final = f"{merged}, {translated}" if remaining == to_translate else translated
-            # 上面那个分支其实等价于「没命中时 merged==text」，这里统一处理
             final = _dedup_tags(f"{merged}, {translated}")
         elif hits:
             final = merged
         else:
             final = translated
+
+        # 去重之后再折叠近义标签（swimsuit+bikini → swimsuit），
+        # 否则模型补出的近义词会和词库结果一起被加权
+        final = _collapse_synonyms(final)
 
         return _clean_result(final)
 
