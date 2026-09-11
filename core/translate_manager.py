@@ -3,27 +3,31 @@
 
 把用户输入（中文或英文）翻译成 NovelAI 能用的英文标签。
 
-支持两种后端（通过配置切换）：
-1. "astrbot" —— 复用 AstrBot 已配置的模型（可勾选多个做轮询）
-2. "openai"  —— 调用插件自己配的 OpenAI 兼容接口
-
-两者都支持轮询：某个模型调用失败时自动换下一个，全部失败才报错。
+特性：
+1. 角色名查表加速：集成 CharacterManager，优先精准匹配热门角色官方 Tag，支持 0 延迟秒回
+2. Few-shot 系统提示词：内置 6 个生动精确的输入输出示例，严格保持权重语法与标签结构
+3. 中文残留检测与重试：校验模型输出，遇中文自动重试（最多1次）并执行兜底清洗
+4. 双后端支持：
+   - "astrbot" —— 复用 AstrBot 已配置的模型（可勾选多个做轮询）
+   - "openai"  —— 调用插件自己配的 OpenAI 兼容接口
 """
 
 import asyncio
 import json
+import logging
+import re
+from pathlib import Path
 from typing import Any
 
 import aiohttp
 
-from astrbot.api import logger
+from .character_manager import CharacterManager
+
+logger = logging.getLogger("astrbot")
 
 
 # 系统提示词
-# 关键约束（这几条是踩坑总结，别随意改）：
-# 1. 只输出标签，不要解释、不要 markdown、不要引号包裹
-# 2. NovelAI 的权重语法（1.2::xxx::、{}、[]）很脆弱，必须原样保留
-# 3. 逗号是标签分隔符，标签本身一般不含逗号
+# 关键约束与 Few-shot 示例
 SYSTEM_PROMPT = (
     "You are a prompt translator for NovelAI image generation.\n"
     "Translate the user's description into English Danbooru-style tags.\n\n"
@@ -39,8 +43,21 @@ SYSTEM_PROMPT = (
     "5. Preserve artist tags such as `artist:name`, `dino_(dinoartforame)` unchanged.\n"
     "6. Keep the original tag order as much as possible; quality tags stay where they are.\n"
     "7. For a single character, start with `1girl` or `1boy` when applicable.\n"
-    "8. Never output Chinese characters in the result.\n"
+    "8. Never output Chinese characters in the result. All tags must be English Danbooru tags.\n"
     "9. If the user asks for a size or other non-visual instruction, ignore it.\n\n"
+    "Examples:\n"
+    "Input: 站在樱花树下的微笑女孩，微风吹拂长发，阳光洒落\n"
+    "Output: 1girl, smiling, standing, sakura tree, cherry blossoms, falling petals, long hair, blowing hair, sunlight, dappled sunlight, outdoors\n\n"
+    "Input: 赛博朋克夜景街道，雨水倒影，霓虹灯光，湿润的地面\n"
+    "Output: cyberpunk, night, street, city, neon lights, glowing, wet clothes, puddle, reflection, dark ambient\n\n"
+    "Input: 1.2::blue eyes::, 穿着白色连衣裙, 露肩, {{masterpiece}}\n"
+    "Output: 1.2::blue eyes::, 1girl, white dress, bare shoulders, {{masterpiece}}\n\n"
+    "Input: artist:wanke, 趴在床上的猫耳少女，慵懒表情，午后阳光\n"
+    "Output: artist:wanke, 1girl, cat ears, lying on bed, lazy expression, looking at viewer, afternoon, sunbeam\n\n"
+    "Input: -2::umbrella::, [black jacket], 雨中奔跑，动感姿态\n"
+    "Output: -2::umbrella::, [black jacket], 1girl, running in rain, rain, dynamic angle, motion blur\n\n"
+    "Input: 银发红瞳的吸血鬼少女，哥特洋装，红色满月背景\n"
+    "Output: 1girl, silver hair, red eyes, vampire, gothic dress, full moon, red moon, night sky\n\n"
     "Output the translated tags in a single line and nothing else."
 )
 
@@ -49,11 +66,17 @@ class TranslateError(RuntimeError):
     """翻译全部失败时抛出"""
 
 
+def _has_chinese(text: str) -> bool:
+    """检查文本是否包含中文字符"""
+    if not text:
+        return False
+    return bool(re.search(r"[\u4e00-\u9fa5]", text))
+
+
 def _clean_result(text: str) -> str:
     """清理模型返回的文本。
 
-    模型经常会自作主张加上 markdown 代码块、引号、或者"Sure, here are the tags:"
-    这类前缀，这些都会污染提示词，必须先洗掉。
+    清洗 markdown 代码块、引号、或者解释性前缀。
     """
     if not text:
         return ""
@@ -62,11 +85,9 @@ def _clean_result(text: str) -> str:
 
     # 去掉 ``` 代码块包裹
     if result.startswith("```"):
-        # 去掉第一行（可能是 ``` 或 ```text）
         lines = result.split("\n")
         if lines and lines[0].startswith("```"):
             lines = lines[1:]
-        # 去掉结尾的 ```
         while lines and lines[-1].strip().startswith("```"):
             lines = lines[:-1]
         result = "\n".join(lines).strip()
@@ -87,7 +108,6 @@ def _clean_result(text: str) -> str:
     # 多行只取第一行（正常情况下应该只有一行）
     if "\n" in result:
         lines = [ln.strip() for ln in result.split("\n") if ln.strip()]
-        # 过滤掉像是解释性文字的短句
         candidates = [ln for ln in lines if "," in ln or " " not in ln.strip()]
         result = candidates[0] if candidates else (lines[0] if lines else result)
 
@@ -95,6 +115,37 @@ def _clean_result(text: str) -> str:
     result = result.strip().strip(",").strip()
 
     return result
+
+
+def _filter_chinese_residue(text: str) -> str:
+    """剔除翻译结果中的残留中文字符和含中文的无效标签"""
+    if not text:
+        return ""
+    tags = [t.strip() for t in text.replace("，", ",").split(",") if t.strip()]
+    cleaned_tags: list[str] = []
+    for tag in tags:
+        if not re.search(r"[\u4e00-\u9fa5]", tag):
+            cleaned_tags.append(tag)
+        else:
+            # 尝试去除 (中文说明)
+            cleaned = re.sub(r"[\(（][^\)）]*[\u4e00-\u9fa5]+[^\)）]*[\)）]", "", tag)
+            # 移除剩余汉字
+            cleaned = re.sub(r"[\u4e00-\u9fa5]+", "", cleaned).strip(" -_:;,")
+            # 去除残留的空括号
+            cleaned = re.sub(r"[\(（]\s*[\)）]", "", cleaned).strip(" -_:;,")
+            # 去除未闭合或多余的单层包裹括号
+            if cleaned.startswith("(") and not cleaned.endswith(")"):
+                cleaned = cleaned.lstrip("(").strip()
+            elif cleaned.endswith(")") and not cleaned.startswith("("):
+                cleaned = cleaned.rstrip(")").strip()
+            elif cleaned.startswith("(") and cleaned.endswith(")") and not cleaned.endswith("))"):
+                inner = cleaned[1:-1].strip()
+                if "(" not in inner and ")" not in inner:
+                    cleaned = inner
+
+            if cleaned and any(c.isalnum() for c in cleaned):
+                cleaned_tags.append(cleaned)
+    return ", ".join(cleaned_tags)
 
 
 class TranslateManager:
@@ -111,13 +162,28 @@ class TranslateManager:
         self.enabled = bool(config.get("translate_enabled", True))
         self.mode = str(config.get("translate_mode", "astrbot")).strip().lower()
 
+        # 角色名查表配置
+        self.char_mapping_enabled = bool(config.get("char_mapping_enabled", True))
+        custom_char_file = str(
+            config.get("custom_characters_file", "data/custom_characters.json") or ""
+        ).strip()
+        if custom_char_file:
+            p = Path(custom_char_file)
+            if not p.is_absolute():
+                base_dir = Path(__file__).resolve().parent.parent
+                custom_char_path = base_dir / p
+            else:
+                custom_char_path = p
+        else:
+            custom_char_path = None
+
+        self.char_manager = CharacterManager(custom_path=custom_char_path)
+
         # astrbot 模式：可轮询多个 provider id；留空则自动使用 AstrBot 当前默认模型
         self.provider_ids = _split_list(config.get("translate_provider_ids", ""))
         self._auto_provider = not self.provider_ids
 
         # openai 模式：单独一个端点（地址 + 密钥 + 模型）
-        # 以前是一个多行文本框，每行 base_url|api_key|model，填起来很痛苦，
-        # 现在拆成配置面板上三个独立输入框，模型还能从接口拉取。
         self.openai_endpoint = {
             "base_url": str(config.get("translate_openai_base_url", "") or "").strip(),
             "api_key": str(config.get("translate_openai_api_key", "") or "").strip(),
@@ -128,7 +194,6 @@ class TranslateManager:
         self.timeout = int(config.get("translate_timeout", 60))
 
         self._preferred_index = 0  # 上次成功的模型下标
-
         self._session: aiohttp.ClientSession | None = None
 
     async def close(self) -> None:
@@ -145,12 +210,33 @@ class TranslateManager:
     async def translate(self, text: str) -> str:
         """把用户输入翻译成英文标签。
 
-        全部模型都失败时抛出 TranslateError，由调用方决定怎么处理。
+        流程：
+        1. 角色名查表前置提取（若开启）：
+           - 纯角色名：直接返回官方 Danbooru Tag，0 延迟秒回
+           - 角色名 + 描述：剩余描述给大模型翻译，角色 Tag 置于最前并去重
+        2. 多模型轮询与容灾
+        3. 中文残留自动检测与二次重试
+        4. 兜底中文字符清洗过滤
         """
         text = (text or "").strip()
         if not text:
             return ""
 
+        char_tags: list[str] = []
+        text_to_translate = text
+
+        # 1. 角色名查表提取
+        if self.char_mapping_enabled and self.char_manager:
+            remaining, extracted_tags = self.char_manager.extract_and_replace(text)
+            char_tags = extracted_tags
+            text_to_translate = remaining
+
+        # 若命中角色且无剩余描述：直接返回角色 Tag，0 耗时 100% 准确
+        if char_tags and not text_to_translate:
+            logger.info("[Translate] 角色名命中且无剩余描述，直出官方 Tag: %s", ", ".join(char_tags))
+            return ", ".join(char_tags)
+
+        # 2. 准备翻译模型候选
         if self.mode == "openai":
             candidates = [self.openai_endpoint] if self._openai_ready() else []
         else:
@@ -175,45 +261,89 @@ class TranslateManager:
                 "请先在 AstrBot 里配置模型，或在插件配置里填写「翻译模型（AstrBot 模式）」"
             )
 
-        # 从上一次成功的模型开始试，成功就把它记住
         order = _rotate(range(len(candidates)), self._preferred_index)
 
         errors: list[str] = []
+        translated_result: str = ""
+
         for idx in order:
             try:
-                if self.mode == "openai":
-                    raw = await self._translate_via_openai(candidates[idx], text)
-                else:
-                    raw = await self._translate_via_astrbot(candidates[idx], text)
-
-                result = _clean_result(raw)
-                if not result:
+                translated_result = await self._translate_candidate(
+                    candidates[idx], text_to_translate
+                )
+                if not translated_result:
                     raise TranslateError("模型返回了空内容")
 
                 if idx != self._preferred_index:
-                    logger.info(
-                        "[Translate] 模型 #%d 翻译成功，切换为首选", idx + 1
-                    )
+                    logger.info("[Translate] 模型 #%d 翻译成功，切换为首选", idx + 1)
                 self._preferred_index = idx
-                return result
+                break
 
             except Exception as e:
                 desc = _describe_candidate(self.mode, candidates[idx])
                 errors.append(f"{desc}: {e}")
                 logger.warning("[Translate] %s 翻译失败，尝试下一个: %s", desc, e)
 
-        raise TranslateError("所有翻译模型都失败了 → " + "；".join(errors))
+        if not translated_result:
+            raise TranslateError("所有翻译模型都失败了 → " + "；".join(errors))
+
+        # 3. 合并角色 Tag 与模型输出的英文标签
+        if char_tags:
+            trans_tags = [t.strip() for t in translated_result.split(",") if t.strip()]
+            merged = list(char_tags)
+            for t in trans_tags:
+                if t not in merged:
+                    merged.append(t)
+            return ", ".join(merged)
+
+        return translated_result
+
+    async def _translate_candidate(self, candidate: Any, text: str) -> str:
+        """调用单个候选模型进行翻译，包含中文残留校验与最多 1 次重试"""
+        if self.mode == "openai":
+            raw = await self._translate_via_openai(candidate, text, self.system_prompt)
+        else:
+            raw = await self._translate_via_astrbot(candidate, text, self.system_prompt)
+
+        result = _clean_result(raw)
+
+        # 中文残留校验与重试（最多 1 次）
+        if _has_chinese(result):
+            logger.warning("[Translate] 模型输出包含中文残留，触发防残留重试: %s", result[:60])
+            retry_prompt = (
+                f"{text}\n\n"
+                "[CRITICAL: The previous translation contained Chinese characters. "
+                "You MUST output ONLY English Danbooru tags separated by commas. "
+                "NO Chinese characters are allowed under any circumstances.]"
+            )
+            try:
+                if self.mode == "openai":
+                    raw_retry = await self._translate_via_openai(
+                        candidate, retry_prompt, self.system_prompt
+                    )
+                else:
+                    raw_retry = await self._translate_via_astrbot(
+                        candidate, retry_prompt, self.system_prompt
+                    )
+                result_retry = _clean_result(raw_retry)
+                if result_retry:
+                    result = result_retry
+            except Exception as e:
+                logger.warning("[Translate] 中文残留重试失败: %s，使用当前结果继续清洗", e)
+
+            # 若重试后依然有残留中文，进行正则清洗与过滤
+            if _has_chinese(result):
+                logger.warning("[Translate] 重试后仍有中文字符，执行清洗过滤: %s", result[:60])
+                result = _filter_chinese_residue(result)
+
+        return result
 
     def _openai_ready(self) -> bool:
         """OpenAI 模式是否已经填够信息（地址 + 模型）"""
         return bool(self.openai_endpoint.get("base_url") and self.openai_endpoint.get("model"))
 
     def _resolve_astrbot_candidates(self) -> list[Any]:
-        """解析 astrbot 模式下要尝试的 provider 列表。
-
-        配置了 translate_provider_ids 就按配置来；
-        没配置就自动抓取 AstrBot 里所有已启用的对话模型（安装插件后免配置即可用）。
-        """
+        """解析 astrbot 模式下要尝试的 provider 列表"""
         if self.provider_ids:
             return list(self.provider_ids)
         if self.context is None:
@@ -249,7 +379,9 @@ class TranslateManager:
             )
         return providers
 
-    async def _translate_via_astrbot(self, provider_id: str, text: str) -> str:
+    async def _translate_via_astrbot(
+        self, provider_id: str, text: str, system_prompt: str | None = None
+    ) -> str:
         """通过 AstrBot 已配置的 provider 翻译"""
         if self.context is None:
             raise TranslateError("没有拿到 AstrBot Context，无法调用框架模型")
@@ -258,17 +390,19 @@ class TranslateManager:
         if provider is None:
             raise TranslateError(f"找不到 provider '{provider_id}'（可能已被删除）")
 
+        sys_prompt = system_prompt or self.system_prompt
         resp = await provider.text_chat(
             prompt=text,
-            system_prompt=self.system_prompt,
+            system_prompt=sys_prompt,
         )
-        # 不同版本返回字段可能有差异，做个兼容
         completion = getattr(resp, "completion_text", None)
         if completion is None and hasattr(resp, "result"):
             completion = getattr(resp.result, "completion_text", None)
         return str(completion or "")
 
-    async def _translate_via_openai(self, item: dict, text: str) -> str:
+    async def _translate_via_openai(
+        self, item: dict, text: str, system_prompt: str | None = None
+    ) -> str:
         """通过自定义 OpenAI 兼容接口翻译"""
         base_url = _normalize_base_url(item.get("base_url", ""))
         api_key = str(item.get("api_key", ""))
@@ -278,10 +412,11 @@ class TranslateManager:
             raise TranslateError("OpenAI 接口的地址或模型没填")
 
         url = f"{base_url}/chat/completions"
+        sys_prompt = system_prompt or self.system_prompt
         payload = {
             "model": model,
             "messages": [
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": text},
             ],
             "temperature": 0.2,
@@ -315,11 +450,7 @@ class TranslateManager:
 # ---------------------------------------------------------------------------
 
 def _is_chat_provider(provider: Any) -> bool:
-    """粗略判断一个 provider 是不是可对话的文本模型。
-
-    AstrBot 里可能还有 tts / stt / embedding 之类的 provider，它们不能拿来翻译。
-    判断不出来时（老版本没 meta()）就当作可用，宁可多试一个也不要漏掉。
-    """
+    """粗略判断一个 provider 是不是可对话的文本模型"""
     getter = getattr(provider, "meta", None)
     if not callable(getter):
         return True
@@ -332,22 +463,18 @@ def _is_chat_provider(provider: Any) -> bool:
 
     ptype = str(getattr(meta, "type", "") or "").strip().lower()
 
-    # 明确排除的非对话类型。注意不能简单用 "text" 做包含匹配 ——
-    # "text_to_speech" 里也含 "text"，会把 tts 放进来。
     if any(k in ptype for k in ("speech", "tts", "stt", "audio", "image", "embed", "rerank")):
         return False
 
     if ptype:
-        # 只放行明确是对话/文本生成的类型
         if not any(k in ptype for k in ("chat", "llm", "completion", "text")):
             return False
 
-    # 兜底：必须真的能对话才行
     return callable(getattr(provider, "text_chat", None))
 
 
 def _split_list(value: Any) -> list[str]:
-    """把配置里的字符串或列表切成去重的字符串列表（支持中英文逗号、分号、换行）"""
+    """把配置里的字符串或列表切成去重的字符串列表"""
     if value is None:
         return []
     if isinstance(value, (list, tuple, set)):
@@ -364,63 +491,14 @@ def _split_list(value: Any) -> list[str]:
     return seen
 
 
-def _parse_openai_models(value: Any) -> list[dict]:
-    """兼容旧版配置：把多行 `base_url|api_key|model` 解析成端点列表。
-
-    仅用于测试/兼容历史数据。新版配置已经拆成三个独立输入框，
-    解析工作由 TranslateManager.__init__ 直接读字段完成。
-    """
-    if isinstance(value, str) and value.strip().startswith("["):
-        try:
-            data = json.loads(value)
-            if isinstance(data, list):
-                return [d for d in data if isinstance(d, dict)]
-        except Exception as e:
-            logger.warning("[Translate] OpenAI 配置 JSON 解析失败，按行解析: %s", e)
-
-    if isinstance(value, (list, tuple)):
-        lines = [str(v) for v in value]
-    else:
-        lines = str(value or "").replace("\r\n", "\n").split("\n")
-
-    result: list[dict] = []
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = [p.strip() for p in line.split("|")]
-        if len(parts) < 3:
-            logger.warning(
-                "[Translate] 这一行格式不对（需要 base_url|api_key|model）: %s", line
-            )
-            continue
-        result.append({"base_url": parts[0], "api_key": parts[1], "model": parts[2]})
-    return result
-
-
-# ---------------------------------------------------------------------------
-# 拉取 OpenAI 兼容接口的模型列表
-#
-# 配置面板上「直译模型」旁边有个「获取模型列表」按钮，点了以后刷新配置页，
-# AstrBot 会去读这里返回的列表 —— 所以这里必须是个同步函数（配置面板是同步渲染的）。
-# 同步函数里不能 await，所以直接读配置缓存 + 用子进程跑一段异步请求。
-# ---------------------------------------------------------------------------
-
 def _normalize_base_url(base_url: str) -> str:
-    """把用户填的地址规整成可以直接拼 /chat/completions 的形式。
-
-    常见写法都能吃：
-        https://api.openai.com            → https://api.openai.com/v1
-        https://api.openai.com/v1/        → https://api.openai.com/v1
-        https://api.openai.com/v1/models  → https://api.openai.com/v1   （去掉误填的尾巴）
-    """
+    """把用户填的地址规整成可以直接拼 /chat/completions 的形式"""
     url = str(base_url or "").strip().rstrip("/")
     if not url:
         return ""
     for tail in ("/chat/completions", "/completions", "/models"):
         if url.endswith(tail):
             url = url[: -len(tail)].rstrip("/")
-    # 本机 / 局域网地址通常走 /v1；显式带了版本号或路径的不动
     if not url.endswith("/v1") and "/v1/" not in url + "/":
         parsed_tail = url.split("//")[-1]
         has_path = "/" in parsed_tail
@@ -434,14 +512,7 @@ def fetch_openai_models(
     api_key: str = "",
     timeout: float = 10.0,
 ) -> list[str]:
-    """请求 `{base_url}/models` 并返回模型 id 列表。
-
-    同步函数（AstrBot 的配置面板就要求同步返回），内部用工作线程跑 aiohttp，
-    避免和已在运行的事件循环冲突（aiohttp 的 asyncio.run 会直接报错）。
-
-    任何失败都只打日志并返回空列表 —— 配置面板拉不到列表不该让整个页面挂掉，
-    用户仍然可以手动填模型名。
-    """
+    """请求 `{base_url}/models` 并返回模型 id 列表"""
     url = _normalize_base_url(base_url)
     if not url:
         logger.warning("[Translate] 未填写接口地址，无法拉取模型列表")
@@ -468,9 +539,7 @@ def fetch_openai_models(
             has_loop = False
 
         if has_loop:
-            # 已经有事件循环在跑（AstrBot 是异步框架），另起线程跑
             import concurrent.futures
-
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 data = pool.submit(lambda: asyncio.run(_do_fetch())).result(timeout + 5)
         else:

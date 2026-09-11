@@ -580,6 +580,7 @@ class Nai2ApiPlugin(Star):
         await self.client.close()
         await self.imgr.close()
         await self.img2img.close()
+        await self.translator.close()
 
     # ------------------------------------------------------------------
     # OpenAI 兼容接口的「选预设 → 自动填地址」与「拉取模型列表」

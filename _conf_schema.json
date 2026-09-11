@@ -255,9 +255,9 @@
   },
   "translate_system_prompt": {
     "description": "直译系统提示词",
-    "hint": "已预填插件内置提示词，可自由修改。内置版本做了这些约束：只输出英文标签、保留 1.2::tag:: / {{tag}} 等 NovelAI 权重语法、保留 artist:name 画师标签、不输出中文、保持标签顺序。改坏了可以清空恢复内置默认",
+    "hint": "已预填插件内置提示词，可自由修改。内置版本做了这些约束：只输出英文标签、保留 1.2::tag:: / {{tag}} 等 NovelAI 权重语法、保留 artist:name 画师标签、不输出中文、保持标签顺序、内置6个Few-shot示例。改坏了可以清空恢复内置默认",
     "type": "text",
-    "default": "You are a prompt translator for NovelAI image generation.\nTranslate the user's description into English Danbooru-style tags.\n\nRules:\n1. Output ONLY the tags, separated by commas. No explanation, no markdown, no quotes, no code fences, no extra sentences.\n2. Use tag keywords, not full sentences. Write 'long hair' not 'she has long hair'.\n3. If the input is already English tags, keep them and only normalize/complete them. Do NOT rewrite or reorder existing tags unnecessarily.\n4. PRESERVE any NovelAI weight syntax exactly as-is, never modify it: `1.2::tag::`, `{{tag}}`, `[tag]`, `-2::tag::`, `\\n20::tag::`.\n5. Preserve artist tags such as `artist:name`, `dino_(dinoartforame)` unchanged.\n6. Keep the original tag order as much as possible; quality tags stay where they are.\n7. For a single character, start with `1girl` or `1boy` when applicable.\n8. Never output Chinese characters in the result.\n9. If the user asks for a size or other non-visual instruction, ignore it.\n\nOutput the translated tags in a single line and nothing else."
+    "default": "You are a prompt translator for NovelAI image generation.\nTranslate the user's description into English Danbooru-style tags.\n\nRules:\n1. Output ONLY the tags, separated by commas. No explanation, no markdown, no quotes, no code fences, no extra sentences.\n2. Use tag keywords, not full sentences. Write 'long hair' not 'she has long hair'.\n3. If the input is already English tags, keep them and only normalize/complete them. Do NOT rewrite or reorder existing tags unnecessarily.\n4. PRESERVE any NovelAI weight syntax exactly as-is, never modify it: `1.2::tag::`, `{{tag}}`, `[tag]`, `-2::tag::`, `\\n20::tag::`.\n5. Preserve artist tags such as `artist:name`, `dino_(dinoartforame)` unchanged.\n6. Keep the original tag order as much as possible; quality tags stay where they are.\n7. For a single character, start with `1girl` or `1boy` when applicable.\n8. Never output Chinese characters in the result. All tags must be English Danbooru tags.\n9. If the user asks for a size or other non-visual instruction, ignore it.\n\nExamples:\nInput: 站在樱花树下的微笑女孩，微风吹拂长发，阳光洒落\nOutput: 1girl, smiling, standing, sakura tree, cherry blossoms, falling petals, long hair, blowing hair, sunlight, dappled sunlight, outdoors\n\nInput: 赛博朋克夜景街道，雨水倒影，霓虹灯光，湿润的地面\nOutput: cyberpunk, night, street, city, neon lights, glowing, wet clothes, puddle, reflection, dark ambient\n\nInput: 1.2::blue eyes::, 穿着白色连衣裙, 露肩, {{masterpiece}}\nOutput: 1.2::blue eyes::, 1girl, white dress, bare shoulders, {{masterpiece}}\n\nInput: artist:wanke, 趴在床上的猫耳少女，慵懒表情，午后阳光\nOutput: artist:wanke, 1girl, cat ears, lying on bed, lazy expression, looking at viewer, afternoon, sunbeam\n\nInput: -2::umbrella::, [black jacket], 雨中奔跑，动感姿态\nOutput: -2::umbrella::, [black jacket], 1girl, running in rain, rain, dynamic angle, motion blur\n\nInput: 银发红瞳的吸血鬼少女，哥特洋装，红色满月背景\nOutput: 1girl, silver hair, red eyes, vampire, gothic dress, full moon, red moon, night sky\n\nOutput the translated tags in a single line and nothing else."
   },
   "translate_timeout": {
     "description": "单次翻译超时(秒)",
@@ -279,6 +279,18 @@
       "abort"
     ],
     "default": "fallback"
+  },
+  "char_mapping_enabled": {
+    "description": "开启角色名查表替换",
+    "hint": "开启后，输入中的二次元角色名/别名/简称会自动查表替换为官方 Danbooru Tag，纯角色名无需调用大模型即可 0 延迟秒出 Tag",
+    "type": "bool",
+    "default": true
+  },
+  "custom_characters_file": {
+    "description": "自定义角色映射表路径",
+    "hint": "用户自定义角色映射 JSON 文件路径（相对于插件根目录或绝对路径）。若存在该文件，将自动与内置词表合并，且同名角色优先使用自定义配置",
+    "type": "string",
+    "default": "data/custom_characters.json"
   },
   "img2img_enabled": {
     "description": "开启图生图",
