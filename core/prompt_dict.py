@@ -164,6 +164,37 @@ _PROTECTED_RE = re.compile(
 # 判断一段文本里有没有中文（词库只索引中文；纯英文片段不用查表）
 _HAS_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
+# 口语填充词 —— 用户天然会说「画一个泳装爱蜜莉雅」「来张白发少女」。
+# 这些前缀对出图没有任何作用，但会让「画一个泳装爱蜜莉雅」整体查不到词库
+# （词库里只有「泳装」「爱蜜莉雅」），白白多调一次模型、还容易被翻歪。
+# 这里在切分前先剥掉。
+#
+# 只在**句首**剥离（`^`），不碰句中 —— 否则「画一个」这种出现在描述中间的
+# 情况可能误伤。另外要求后面跟着别的内容，避免把整句都删光。
+_FILLER_PREFIX_RE = re.compile(
+    r"^\s*(?:"
+    r"帮我|请|麻烦|给我|来一?[张个幅]|生成|画一?[张个幅]|画|来|搞一?[张个幅]|整一?[张个幅]|做一?[张个幅]"
+    r"|我想要?|我要|我想|出图|产图|捏一?[张个幅]"
+    r")\s*(?=\S)"
+)
+
+
+def strip_filler(text: str) -> str:
+    """剥掉「画一个」「来张」这类口语填充前缀。
+
+    只处理句首，且会反复剥离（「帮我画一个 XX」→「XX」）。
+    剥空的极端情况返回原文，避免把输入清成空串。
+    """
+    if not text:
+        return text
+    out = text.strip()
+    for _ in range(4):  # 最多剥 4 层，防止病态输入
+        new = _FILLER_PREFIX_RE.sub("", out)
+        if new == out:
+            break
+        out = new
+    return out.strip() or text
+
 
 def has_cjk(text: str) -> bool:
     """文本里是否含有中日韩汉字。用于判断「还有没有没翻掉的中文」"""
@@ -286,9 +317,17 @@ class PromptDictionary:
 
         按词长从长到短替换，避免「黑」抢走「黑猫」的一部分。
 
-        替换时会补一个空格做分隔 —— 否则连写输入比如「鸣潮达尼亚」会变成
-        `wuthering_wavesdenia_(wuthering_waves)`，两个英文标签粘成一坨，
-        模型和 NovelAI 都读不懂。
+        替换时两侧补**逗号**做分隔，而不是空格 —— 这里有两个原因：
+
+        1. 不补分隔符的话，连写输入（「鸣潮达尼亚」）会变成
+           `wuthering_wavesdenia_(wuthering_waves)`，两个标签粘成一坨，
+           NovelAI 完全读不懂。
+        2. 补空格虽然能断开，但 NovelAI 的标签分隔符是**逗号**：空格分隔的
+           `wuthering_waves denia_(...)` 会被当成一个混合概念，而逗号分隔
+           才是两个独立标签。多词标签（`white hair`）内部本身含空格，
+           用空格做分隔符还会和它混淆。
+
+        逗号 + 后续 `_tidy()` 收敛重复分隔符，既断得开也不会产生 `,,`。
 
         Returns:
             (替换后的文本, 替换次数)
@@ -299,11 +338,9 @@ class PromptDictionary:
         count = 0
         for zh, en in self._by_length:
             if zh in out:
-                # 前后补空格：既隔开相邻标签，也隔开中文残留
-                out = out.replace(zh, f" {en} ")
+                # 两侧补逗号：既隔开相邻标签，也隔开中文残留
+                out = out.replace(zh, f", {en}, ")
                 count += 1
-        # 收敛多余空白（替换会引入连续空格）
-        out = re.sub(r"\s+", " ", out).strip()
         return out, count
 
     def __len__(self) -> int:
@@ -353,18 +390,23 @@ def apply_dictionary(
     if not dictionary.enabled or not (text or "").strip():
         return text, text, [], []
 
+    # 先剥口语前缀。注意：剥掉的部分**不再回填**到 merged ——
+    # 「画一个」本来就不该出现在 prompt 里。但 remaining 要用剥离后的文本，
+    # 否则这段噪音会跟着一起发给模型，模型有可能把它翻成 `draw a` 混进 tags。
+    body = strip_filler(text)
+
     if dictionary.mode == "substring":
-        replaced, _ = dictionary.replace_substring(text)
+        replaced, _ = dictionary.replace_substring(body)
         replaced = _tidy(replaced)
         # 子串模式下无法可靠区分单期命中/未命中，如果还有中文就整句交给模型
         if has_cjk(replaced):
             return replaced, replaced, [], []
-        return replaced, "", [text], []
+        return replaced, "", [body], []
 
     # --- 逐词精确匹配 ---
-    segments = split_segments(text)
+    segments = split_segments(body)
     if not segments:
-        return text, text, [], []
+        return text, body, [], []
 
     hits: list[str] = []
     misses: list[str] = []
@@ -382,19 +424,40 @@ def apply_dictionary(
             hits.append(seg)
             out_parts.append(en)
         else:
-            # 未命中的部分**不能**留在 merged 里。
+            # 逐词查不到时，尝试**子串兜底**：用户经常把词连写
+            # （「鸣潮达妮娅」「泳装爱蜜莉雅」），按分隔符切分后整段查不到，
+            # 但里面其实包含多个词库词条，整体甩给模型很容易翻车 ——
+            # 线上真实日志：「鸣潮达妮娅」被模型翻成 dania_(wuthering_waves)，
+            # 正确是 denia_（拼错了）。词库明明有这角色却因「连写」没用上。
             #
-            # 曾经的 bug：这里 append(seg) 把未翻译的中文留在了 merged，
-            # 而同一段文本又通过 remaining 发给模型翻译一次 —— 导致中文
-            # 既出现在「已翻译结果」里、又被翻译了一遍，最终 prompt 变成
-            # `wuthering_waves, denia_(...), 泳装, swimsuit`：
-            # 中文残留白占 token（NAI 根本不认识），
-            # 而且模型若翻成别的写法（如 bikini）就会和原词重复加权。
+            # ⚠️ 但子串替换是把双刃剑，必须**只在能完整消化整个片段时**采用。
+            # 反例：「一个婴儿，超级赛亚人发型」里的 `赛亚人` 没收录，
+            # 而 `亚人` → `ajin` 在词库里 —— 于是被替换成 `超级赛 ajin 发型`，
+            # 用户在 prompt 里得到一段连自己都没写过的诡异内容。这类「半截
+            # 命中」比不命中危险得多：不命中只是交给模型（顶多翻得一般），
+            # 半截命中是**直接污染 prompt**。
             #
-            # 正确做法：未命中的片段只走 remaining，交给模型翻译后再拼回来。
-            # 这里只记录，不输出。
-            misses.append(seg)
+            # 所以这里的判据是：替换完还有中文残留 → 整个片段放弃兜底，
+            # 原样交给模型处理。
+            sub, n_sub = dictionary.replace_substring(seg)
+            if n_sub and not has_cjk(sub):
+                hits.append(seg)
+                out_parts.append(_tidy(sub))
+            else:
+                # 未命中的部分**不能**留在 merged 里。
+                #
+                # 曾经的 bug：这里 append(seg) 把未翻译的中文留在了 merged，
+                # 而同一段文本又通过 remaining 发给模型翻译一次 —— 导致中文
+                # 既出现在「已翻译结果」里、又被翻译了一遍，最终 prompt 变成
+                # `wuthering_waves, denia_(...), 泳装, swimsuit`：
+                # 中文残留白占 token（NAI 根本不认识），
+                # 而且模型若翻成别的写法（如 bikini）就会和原词重复加权。
+                #
+                # 正确做法：未命中的片段只走 remaining，交给模型翻译后再拼回来。
+                # 这里只记录，不输出。
+                misses.append(seg)
 
     merged = _tidy(", ".join(out_parts))
     remaining = ", ".join(misses)
     return merged, remaining, hits, misses
+
