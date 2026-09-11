@@ -382,8 +382,18 @@ def apply_dictionary(
             hits.append(seg)
             out_parts.append(en)
         else:
+            # 未命中的部分**不能**留在 merged 里。
+            #
+            # 曾经的 bug：这里 append(seg) 把未翻译的中文留在了 merged，
+            # 而同一段文本又通过 remaining 发给模型翻译一次 —— 导致中文
+            # 既出现在「已翻译结果」里、又被翻译了一遍，最终 prompt 变成
+            # `wuthering_waves, denia_(...), 泳装, swimsuit`：
+            # 中文残留白占 token（NAI 根本不认识），
+            # 而且模型若翻成别的写法（如 bikini）就会和原词重复加权。
+            #
+            # 正确做法：未命中的片段只走 remaining，交给模型翻译后再拼回来。
+            # 这里只记录，不输出。
             misses.append(seg)
-            out_parts.append(seg)
 
     merged = _tidy(", ".join(out_parts))
     remaining = ", ".join(misses)
