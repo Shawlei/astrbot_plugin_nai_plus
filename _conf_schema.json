@@ -253,11 +253,68 @@
     "options": [],
     "apply_provider_default": true
   },
+  "translate_dictionary_enabled": {
+    "description": "词库直译（不走模型）",
+    "hint": "开启后，命中词库的短语会被直接替换成官方英文标签，完全不调用翻译模型，又快又准（角色名尤其准）。剩余的没命中的部分才交给模型。强烈建议开启",
+    "type": "bool",
+    "default": true
+  },
+  "translate_dictionary_match": {
+    "description": "词库匹配方式",
+    "hint": "「仅精确匹配」按逗号/空格切词后逐词查表，不会误伤（推荐）；「允许内嵌替换」还会在长句里做子串替换，能命中「白发少女站在樱花树下」这类连写句子，但短词可能误替换",
+    "type": "string",
+    "options": [
+      "segment",
+      "substring"
+    ],
+    "labels": [
+      "仅精确匹配（按词切分，推荐）",
+      "允许内嵌替换（连写句子也能命中）"
+    ],
+    "default": "segment"
+  },
+  "translate_verify_enabled": {
+    "description": "翻译结果校验",
+    "hint": "检查模型返回的结果里有没有残留中文，有就自动重翻一次；仍然有就按你的选择提示或放行。能挡掉大部分「模型偷懒没翻完」的情况",
+    "type": "bool",
+    "default": true
+  },
+  "translate_verify_retry": {
+    "description": "校验失败后重翻次数",
+    "hint": "检测到残留中文时自动重翻的次数。设为 0 表示不重翻，只提示",
+    "type": "int",
+    "default": 1,
+    "slider": {
+      "min": 0,
+      "max": 3,
+      "step": 1
+    }
+  },
+  "translate_verify_on_fail": {
+    "description": "重翻后仍有中文时",
+    "hint": "warn=照常生图但提醒你「有中文没翻掉」（推荐，不打断流程）；abort=直接终止不生图，避免浪费点数",
+    "type": "string",
+    "options": [
+      "warn",
+      "abort"
+    ],
+    "labels": [
+      "提醒但继续生图",
+      "终止不生图"
+    ],
+    "default": "warn"
+  },
+  "translate_user_dict_path": {
+    "description": "自定义词库文件路径",
+    "hint": "留空则只用插件内置词库。填一个 .json 或 .txt 路径可加载你自己的词库（会与内置词库合并，你的优先）。相对路径按 AstrBot 数据目录算。格式见 README「词库」章节",
+    "type": "string",
+    "default": ""
+  },
   "translate_system_prompt": {
     "description": "直译系统提示词",
     "hint": "已预填插件内置提示词，可自由修改。内置版本做了这些约束：只输出英文标签、保留 1.2::tag:: / {{tag}} 等 NovelAI 权重语法、保留 artist:name 画师标签、不输出中文、保持标签顺序。改坏了可以清空恢复内置默认",
     "type": "text",
-    "default": "You are a prompt translator for NovelAI image generation.\nTranslate the user's description into English Danbooru-style tags.\n\nRules:\n1. Output ONLY the tags, separated by commas. No explanation, no markdown, no quotes, no code fences, no extra sentences.\n2. Use tag keywords, not full sentences. Write 'long hair' not 'she has long hair'.\n3. If the input is already English tags, keep them and only normalize/complete them. Do NOT rewrite or reorder existing tags unnecessarily.\n4. PRESERVE any NovelAI weight syntax exactly as-is, never modify it: `1.2::tag::`, `{{tag}}`, `[tag]`, `-2::tag::`, `\\n20::tag::`.\n5. Preserve artist tags such as `artist:name`, `dino_(dinoartforame)` unchanged.\n6. Keep the original tag order as much as possible; quality tags stay where they are.\n7. For a single character, start with `1girl` or `1boy` when applicable.\n8. Never output Chinese characters in the result.\n9. If the user asks for a size or other non-visual instruction, ignore it.\n\nOutput the translated tags in a single line and nothing else."
+    "default": "You are a prompt translator for NovelAI image generation.\nTranslate the user's description into English Danbooru-style tags.\n\nRules:\n1. Output ONLY the tags, separated by commas. No explanation, no markdown, no quotes, no code fences, no extra sentences.\n2. Use tag keywords, not full sentences. Write 'long hair' not 'she has long hair'.\n3. If the input is already English tags, keep them and only normalize/complete them. Do NOT rewrite or reorder existing tags unnecessarily.\n4. PRESERVE any NovelAI weight syntax exactly as-is, never modify it: `1.2::tag::`, `{{tag}}`, `[tag]`, `-2::tag::`, `\\n20::tag::`.\n5. Preserve artist tags such as `artist:name`, `dino_(dinoartforame)` unchanged.\n6. Keep the original tag order as much as possible; quality tags stay where they are.\n7. For a single character, start with `1girl` or `1boy` when applicable.\n8. Never output Chinese characters in the result.\n9. If the user asks for a size or other non-visual instruction, ignore it.\n10. Convert Chinese counters and quantifiers into tags: 双马尾 → twintails, 两把刀 → holding two swords.\n\nExamples:\nInput: 白发少女站在樱花树下，回头微笑\nOutput: 1girl, white hair, standing, cherry blossoms, tree, looking back, smile\n\nInput: 原神 雷电将军 紫色长发 和服\nOutput: raiden shogun, purple hair, long hair, japanese clothes, 1girl\n\nInput: {{1girl}} 1.3::silver hair:: [detailed]\nOutput: {{1girl}}, 1.3::silver hair::, [detailed]\n\nInput: 1girl, silver hair, looking at viewer\nOutput: 1girl, silver hair, looking at viewer\n\nInput: 赛博朋克风格的城市夜景，霓虹灯，雨，氛围感\nOutput: cyberpunk, city, night, neon lights, rain, cinematic lighting, depth of field, 1girl\n\nInput: 一个女孩抱着猫坐在床上，猫是橘色的\nOutput: 1girl, holding cat, cat, orange cat, sitting, on bed, indoors\n\nOutput the translated tags in a single line and nothing else."
   },
   "translate_timeout": {
     "description": "单次翻译超时(秒)",

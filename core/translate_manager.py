@@ -12,11 +12,18 @@
 
 import asyncio
 import json
+import re
 from typing import Any
 
 import aiohttp
 
 from astrbot.api import logger
+
+from .prompt_dict import (
+    PromptDictionary,
+    apply_dictionary,
+    has_cjk,
+)
 
 
 # 系统提示词
@@ -24,6 +31,15 @@ from astrbot.api import logger
 # 1. 只输出标签，不要解释、不要 markdown、不要引号包裹
 # 2. NovelAI 的权重语法（1.2::xxx::、{}、[]）很脆弱，必须原样保留
 # 3. 逗号是标签分隔符，标签本身一般不含逗号
+#
+# 关于示例（few-shot）：只有规则没有例子时模型会「飘」—— 典型表现是把描写性
+# 长句直译成英文句子、给标签加上冠词和 be 动词、或者把中文语序硬搬成英文。
+# 下面这几组示例是按实际翻车类型挑的，每条都对应一类错误，不是为了凑数：
+#   - 长句 → 标签（模型最容易犯的错）
+#   - 角色名（必须落到 Danbooru 官方标签，不能音译）
+#   - 权重语法（极易被模型「顺手规范化」掉）
+#   - 已英文输入（模型容易自作主张重写）
+#   - 抽象氛围（考的是从描述里提取标签的能力）
 SYSTEM_PROMPT = (
     "You are a prompt translator for NovelAI image generation.\n"
     "Translate the user's description into English Danbooru-style tags.\n\n"
@@ -40,7 +56,23 @@ SYSTEM_PROMPT = (
     "6. Keep the original tag order as much as possible; quality tags stay where they are.\n"
     "7. For a single character, start with `1girl` or `1boy` when applicable.\n"
     "8. Never output Chinese characters in the result.\n"
-    "9. If the user asks for a size or other non-visual instruction, ignore it.\n\n"
+    "9. If the user asks for a size or other non-visual instruction, ignore it.\n"
+    "10. Convert Chinese counters and quantifiers into tags: 双马尾 → twintails, "
+    "两把刀 → holding two swords.\n\n"
+    "Examples:\n"
+    "Input: 白发少女站在樱花树下，回头微笑\n"
+    "Output: 1girl, white hair, standing, cherry blossoms, tree, looking back, smile\n\n"
+    "Input: 原神 雷电将军 紫色长发 和服\n"
+    "Output: raiden shogun, purple hair, long hair, japanese clothes, 1girl\n\n"
+    "Input: {{1girl}} 1.3::silver hair:: [detailed]\n"
+    "Output: {{1girl}}, 1.3::silver hair::, [detailed]\n\n"
+    "Input: 1girl, silver hair, looking at viewer\n"
+    "Output: 1girl, silver hair, looking at viewer\n\n"
+    "Input: 赛博朋克风格的城市夜景，霓虹灯，雨，氛围感\n"
+    "Output: cyberpunk, city, night, neon lights, rain, cinematic lighting, "
+    "depth of field, 1girl\n\n"
+    "Input: 一个女孩抱着猫坐在床上，猫是橘色的\n"
+    "Output: 1girl, holding cat, cat, orange cat, sitting, on bed, indoors\n\n"
     "Output the translated tags in a single line and nothing else."
 )
 
@@ -97,6 +129,41 @@ def _clean_result(text: str) -> str:
     return result
 
 
+_CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
+
+
+def _extract_cjk(text: str) -> str:
+    """把文本里残留的中文片段抠出来，用于报错提示和重翻指令"""
+    runs = _CJK_RUN_RE.findall(text or "")
+    # 去重但保持出现顺序
+    seen, out = set(), []
+    for r in runs:
+        if r not in seen:
+            seen.add(r)
+            out.append(r)
+    return "、".join(out[:8])
+
+
+def _dedup_tags(tags: str) -> str:
+    """标签去重（保留首次出现的顺序）
+
+    词库直译和模型翻译拼在一起时很容易出现重复 —— 比如词库把「白发」翻成
+    `white hair`，模型又自己补了一个 `white hair`。重复标签在 NovelAI 里
+    等于加权，会让画面过拟合，所以这里按小写去重。
+    """
+    parts = [p.strip() for p in (tags or "").split(",")]
+    seen, out = set(), []
+    for p in parts:
+        if not p:
+            continue
+        key = p.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return ", ".join(out)
+
+
 class TranslateManager:
     """提示词翻译管理器"""
 
@@ -127,6 +194,21 @@ class TranslateManager:
         self.system_prompt = str(config.get("translate_system_prompt", "")).strip() or SYSTEM_PROMPT
         self.timeout = int(config.get("translate_timeout", 60))
 
+        # 词库直译（不走模型）
+        self.dictionary = PromptDictionary(
+            user_path=str(config.get("translate_user_dict_path", "") or ""),
+            enabled=bool(config.get("translate_dictionary_enabled", True)),
+            mode=str(config.get("translate_dictionary_match", "segment") or "segment"),
+        )
+
+        # 结果校验（检查残留中文）
+        self.verify_enabled = bool(config.get("translate_verify_enabled", True))
+        self.verify_retry = max(0, int(config.get("translate_verify_retry", 1)))
+        self.verify_on_fail = str(config.get("translate_verify_on_fail", "warn")).strip().lower()
+
+        # 最近一次翻译的统计，供日志/调试查看
+        self.last_stats: dict[str, Any] = {}
+
         self._preferred_index = 0  # 上次成功的模型下标
 
         self._session: aiohttp.ClientSession | None = None
@@ -145,11 +227,43 @@ class TranslateManager:
     async def translate(self, text: str) -> str:
         """把用户输入翻译成英文标签。
 
+        整个流程分三段，越靠前越省：
+
+        1. **词库直译** —— 命中就完成，不调模型。全部命中时直接返回
+        2. **模型翻译** —— 只把词库没覆盖到的部分交给模型
+        3. **结果校验** —— 检查有没有残留中文，有就重翻一次
+
         全部模型都失败时抛出 TranslateError，由调用方决定怎么处理。
         """
         text = (text or "").strip()
         if not text:
             return ""
+
+        self.last_stats = {}
+
+        # ---- 第一段：词库直译 ----
+        merged, remaining, hits, misses = apply_dictionary(text, self.dictionary)
+        self.last_stats.update(
+            {"dict_hits": hits, "dict_misses": misses, "dict_bypassed": False}
+        )
+
+        if hits and not remaining:
+            # 全部命中 —— 完全不需要模型，这也是「减少 LLM 调用」的核心收益
+            self.last_stats["dict_bypassed"] = True
+            logger.info(
+                "[Translate] 词库全命中（%d 条），跳过模型：%s",
+                len(hits), "、".join(hits[:8]),
+            )
+            return merged
+
+        if hits:
+            logger.info(
+                "[Translate] 词库命中 %d 条，剩余交给模型：%s",
+                len(hits), remaining[:80],
+            )
+
+        # 交给模型的是「未命中的部分」，已命中的部分等模型翻完再拼回去
+        to_translate = remaining or text
 
         if self.mode == "openai":
             candidates = [self.openai_endpoint] if self._openai_ready() else []
@@ -175,10 +289,29 @@ class TranslateManager:
                 "请先在 AstrBot 里配置模型，或在插件配置里填写「翻译模型（AstrBot 模式）」"
             )
 
-        # 从上一次成功的模型开始试，成功就把它记住
-        order = _rotate(range(len(candidates)), self._preferred_index)
+        translated = await self._translate_with_candidates(candidates, to_translate)
 
+        # ---- 第三段：结果校验 ----
+        translated = await self._verify_and_fix(translated, candidates, to_translate)
+
+        # 已命中的部分要拼回去：顺序上保持「词库结果在前」，
+        # 因为用户输入的往往是「白发 双马尾」这类属性词在前、描述在后
+        if hits and translated:
+            final = f"{merged}, {translated}" if remaining == to_translate else translated
+            # 上面那个分支其实等价于「没命中时 merged==text」，这里统一处理
+            final = _dedup_tags(f"{merged}, {translated}")
+        elif hits:
+            final = merged
+        else:
+            final = translated
+
+        return _clean_result(final)
+
+    async def _translate_with_candidates(self, candidates: list[Any], text: str) -> str:
+        """带轮询地调用模型翻译（某个失败自动换下一个）"""
+        order = _rotate(range(len(candidates)), self._preferred_index)
         errors: list[str] = []
+
         for idx in order:
             try:
                 if self.mode == "openai":
@@ -191,9 +324,7 @@ class TranslateManager:
                     raise TranslateError("模型返回了空内容")
 
                 if idx != self._preferred_index:
-                    logger.info(
-                        "[Translate] 模型 #%d 翻译成功，切换为首选", idx + 1
-                    )
+                    logger.info("[Translate] 模型 #%d 翻译成功，切换为首选", idx + 1)
                 self._preferred_index = idx
                 return result
 
@@ -203,6 +334,69 @@ class TranslateManager:
                 logger.warning("[Translate] %s 翻译失败，尝试下一个: %s", desc, e)
 
         raise TranslateError("所有翻译模型都失败了 → " + "；".join(errors))
+
+    async def _verify_and_fix(
+        self, result: str, candidates: list[Any], original: str
+    ) -> str:
+        """校验翻译结果里有没有残留中文，有就重翻
+
+        为什么单独做这一步：模型「翻一半就交卷」是很常见的行为 ——
+        尤其是输入里的中文专有名词，模型会直接原样抄回来。这种结果
+        NovelAI 完全无法理解（它只认英文标签），但界面上看起来「翻过了」，
+        所以必须在送出去之前拦一道。
+
+        Returns:
+            修正后的结果。重翻后仍有中文时按 verify_on_fail 决定是原样返回
+            （由上层提示）还是抛错。
+        """
+        if not self.verify_enabled or not result:
+            return result
+
+        if not has_cjk(result):
+            self.last_stats["verify"] = "ok"
+            return result
+
+        leftovers = _extract_cjk(result)
+        self.last_stats["verify"] = "cjk-left"
+        self.last_stats["leftover"] = leftovers
+
+        if self.verify_retry <= 0:
+            logger.warning("[Translate] 结果里残留中文（未开启重翻）：%s", leftovers)
+            return result
+
+        # 重翻时把「有中文没翻掉」这件事明确说给模型，比原样再问一次有效得多
+        retry_input = (
+            f"{original}\n\n"
+            f"NOTE: your previous answer still contained Chinese characters "
+            f"({leftovers}). Translate EVERYTHING into English tags. "
+            f"Never output any Chinese character."
+        )
+
+        for attempt in range(self.verify_retry):
+            try:
+                retried = await self._translate_with_candidates(candidates, retry_input)
+            except TranslateError as e:
+                logger.warning("[Translate] 重翻失败（第 %d 次）：%s", attempt + 1, e)
+                break
+
+            if not has_cjk(retried):
+                logger.info("[Translate] 重翻成功，已消除残留中文：%s", leftovers)
+                self.last_stats["verify"] = "fixed"
+                return retried
+
+            leftovers = _extract_cjk(retried)
+            retry_input = retry_input.replace(leftovers, "").strip()
+            logger.warning(
+                "[Translate] 重翻后仍有中文（第 %d 次）：%s", attempt + 1, leftovers
+            )
+
+        self.last_stats["verify"] = "failed"
+        if self.verify_on_fail == "abort":
+            raise TranslateError(
+                f"翻译结果里仍有中文标签「{leftovers}」，已按你的设置终止生图。"
+                f"可以把这些词加进自定义词库，或换个直译模型再试"
+            )
+        return result
 
     def _openai_ready(self) -> bool:
         """OpenAI 模式是否已经填够信息（地址 + 模型）"""

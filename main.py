@@ -80,6 +80,7 @@ HELP_TEXT = (
     "用法: /{cmd} [尺寸] <提示词> [-p <预设>] [-m <模型>] [--artist <质量前缀>] [--negative <负面>] [--seed <种子>]\n"
     "预设: /{cmd} presets(预设) | /{cmd} save(保存) <名称> <质量前缀> | /{cmd} update(修改) <名称> <新前缀> | /{cmd} del(删除) <名称>\n"
     "余额: /{cmd} balance(余额/点数/次数)\n"
+    "词库: /{cmd} dict(词库) 查看状态 | /{cmd} dict(词库) <文本> 测试命中情况\n"
     "尺寸: 竖图|横图|方图|2K竖图|2K横图|2K方图|4K竖图|4K横图|4K方图\n"
     "模型: 5(V5) | 4.5 | 4 | 3 | furry | 2 | safe   —— 也可写全名 nai-diffusion-5-full\n\n"
     "图生图: 先发一张图，然后「回复」那张图再发本指令，会自动用它作参考图\n"
@@ -90,7 +91,9 @@ HELP_TEXT = (
     "  V4.5 普通尺寸 = 1 点    V5 普通尺寸 = 5 点\n"
     "  2K = 15 点              4K = 25 点\n"
     "  高扣点会先让你确认一次，避免误扣\n\n"
-    "中文/英文提示词都会自动直译成英文标签再生成\n\n"
+    "中文/英文提示词都会自动直译成英文标签再生成\n"
+    "  先查内置词库（雷电将军、白发、樱花…约 1000 条），命中的词不调用模型\n"
+    "  剩下的没命中的部分才交给翻译模型，翻完还会检查有没有残留中文\n\n"
     "示例:\n"
     "  /{cmd} 1girl, silver hair\n"
     "  /{cmd} 一个银发女孩                          (中文直接写，自动翻译)\n"
@@ -498,6 +501,17 @@ class Nai2ApiPlugin(Star):
             if translated:
                 if translated.strip() != prompt.strip():
                     logger.info("[Nai2API] 提示词已直译: %s → %s", prompt[:60], translated[:60])
+                # 校验失败（翻完仍有中文）时提醒用户，但按配置决定是否继续
+                stats = getattr(self.translator, "last_stats", None) or {}
+                if stats.get("verify") == "failed":
+                    leftover = stats.get("leftover") or "部分内容"
+                    warn = (
+                        f"⚠️ 翻译结果里仍有中文标签「{leftover}」，NovelAI 可能无法理解。\n"
+                        f"可以把它加进自定义词库（配置项「自定义词库文件路径」），"
+                        f"或换个直译模型再试"
+                    )
+                    logger.warning("[Nai2API] %s", warn.replace("\n", " "))
+                    return translated, warn
                 return translated, None
             return prompt, None
 
@@ -792,6 +806,16 @@ class Nai2ApiPlugin(Star):
         if args in ("balance", "余额", "点数", "次数"):
             return await self._handle_balance(event)
 
+        # 子命令：词库状态 / 测试词库命中（中英文别名）
+        if args in ("dict", "词库") or args.startswith("dict ") or args.startswith("词库 "):
+            if args.startswith("dict "):
+                rest = args[5:].strip()
+            elif args.startswith("词库 "):
+                rest = args[3:].strip()
+            else:
+                rest = ""
+            return self._handle_dict(event, rest)
+
         # 子命令：save <名称> <质量前缀>（中英文别名）
         if args.startswith("save ") or args.startswith("保存 "):
             rest = args[5:].strip() if args.startswith("save ") else args[3:].strip()
@@ -1034,6 +1058,59 @@ class Nai2ApiPlugin(Star):
         lines.append(f"  2K尺寸: ~{balance_int // COST_2K} 张（每张 {COST_2K} 点）")
         lines.append(f"  4K尺寸: ~{balance_int // COST_4K} 张（每张 {COST_4K} 点）")
         return "\n".join(lines)
+
+    def _handle_dict(self, event: AstrMessageEvent, query: str = ""):
+        """词库状态查询 / 命中测试
+
+        带参数时会就地测一段文本的命中情况 —— 这样用户加完自定义词库
+        不用真的去生一张图才验证是否生效。
+        """
+        dictionary = getattr(self.translator, "dictionary", None)
+        if dictionary is None:
+            return event.plain_result("词库没启用（或插件版本不支持）")
+
+        stats = dictionary.stats()
+
+        # 带参数：测一段文本
+        if query:
+            from .core.prompt_dict import apply_dictionary, has_cjk
+
+            merged, remaining, hits, misses = apply_dictionary(query, dictionary)
+            lines = [
+                f"输入: {query}",
+                "---",
+                f"命中 {len(hits)} 个: {', '.join(hits) if hits else '（无）'}",
+                f"未命中 {len(misses)} 个: {', '.join(misses) if misses else '（无）'}",
+                "---",
+                f"结果: {merged}",
+            ]
+            if remaining:
+                lines.append("")
+                lines.append(
+                    f"⚠️ 还有 {len(misses)} 个词没命中，这些会交给翻译模型处理。"
+                    f"想完全不走模型，可以把它们加进自定义词库"
+                )
+            else:
+                lines.append("")
+                lines.append("✅ 全部命中，这次生图不会调用翻译模型")
+            return self._forward_result(event, "词库命中测试", "\n".join(lines))
+
+        # 不带参数：显示词库概况
+        lines = [
+            f"状态: {'已启用' if stats['enabled'] else '已关闭'}",
+            f"匹配模式: {'逐词精确匹配' if stats['mode'] == 'segment' else '允许内嵌替换'}",
+            f"内置词条: {stats['builtin']} 条",
+            f"自定义词条: {stats['user']} 条",
+            f"合计: {stats['total']} 条",
+            "",
+            "词库命中时不会调用翻译模型 —— 命中率越高，生图越快、角色名越准。",
+            "",
+            "想扩充词库：在配置项「自定义词库文件路径」里填一个 .json 或 .txt 文件的路径，",
+            "格式见 README 的「词库」章节。改完重启插件即可生效。",
+            "",
+            "测试某个词是否命中: /nai dict <要测试的文本>",
+        ]
+        return self._forward_result(event, "词库状态", "\n".join(lines))
 
     def _handle_presets(self, event: AstrMessageEvent, preset_name: str = ""):
         """处理预设列表 / 查看单个预设"""
