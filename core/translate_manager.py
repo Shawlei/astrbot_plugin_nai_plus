@@ -73,6 +73,18 @@ def _has_chinese(text: str) -> bool:
     return bool(re.search(r"[\u4e00-\u9fa5]", text))
 
 
+# 成对引号映射表（支持英文及全角中文引号）
+PAIRED_QUOTES = {
+    '"': '"',
+    "'": "'",
+    "“": "”",
+    "‘": "’",
+    "「": "」",
+    "『": "』",
+    "《": "》",
+}
+
+
 def _clean_result(text: str) -> str:
     """清理模型返回的文本。
 
@@ -92,8 +104,12 @@ def _clean_result(text: str) -> str:
             lines = lines[:-1]
         result = "\n".join(lines).strip()
 
-    # 去掉成对的首尾引号
-    if len(result) >= 2 and result[0] == result[-1] and result[0] in "\"'“”‘’":
+    # 去掉成对的首尾引号（支持英文引号及中文全角引号，循环剥离多层引号）
+    while (
+        len(result) >= 2
+        and result[0] in PAIRED_QUOTES
+        and result[-1] == PAIRED_QUOTES[result[0]]
+    ):
         result = result[1:-1].strip()
 
     # 去掉常见的解释性前缀
@@ -125,7 +141,11 @@ def _filter_chinese_residue(text: str) -> str:
     cleaned_tags: list[str] = []
     for tag in tags:
         if not re.search(r"[\u4e00-\u9fa5]", tag):
-            cleaned_tags.append(tag)
+            # 过滤纯标点、空括号等无效残留（必须包含字母或数字）
+            cleaned = tag.strip(" -_:;,")
+            cleaned = re.sub(r"[\(（]\s*[\)）]", "", cleaned).strip(" -_:;,")
+            if cleaned and any(c.isalnum() for c in cleaned):
+                cleaned_tags.append(cleaned)
         else:
             # 尝试去除 (中文说明)
             cleaned = re.sub(r"[\(（][^\)）]*[\u4e00-\u9fa5]+[^\)）]*[\)）]", "", tag)
