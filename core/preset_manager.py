@@ -89,12 +89,33 @@ def _normalize_entry(raw: dict | str, default_type: str = "custom") -> dict[str,
     }
 
 
-def sync_panel_preset(config: MutableMapping[str, object], manager: "PresetManager") -> bool:
-    """把配置面板的一次性预设输入同步到预设库。
+def _panel_preset_group(
+    config: MutableMapping[str, object],
+) -> MutableMapping[str, object]:
+    """Return the writable preset group, falling back to legacy flat config."""
+    group = config.get("preset_management")
+    if isinstance(group, MutableMapping):
+        return group
+    return config
 
-    只有名称非空时才提交；保存成功后清空名称和三要素输入。这样面板的
-    “保存配置并重载”可作为可靠确认动作，下一次重载不会再次新增同一批输入。
-    保存失败时保留原输入，方便用户修正后重试。
+
+def _panel_preset_value(
+    config: MutableMapping[str, object],
+    group: MutableMapping[str, object],
+    field_name: str,
+    default: object,
+) -> object:
+    """Read a grouped preset field with legacy top-level fallback."""
+    return group.get(field_name, config.get(field_name, default))
+
+
+def sync_panel_preset(config: MutableMapping[str, object], manager: "PresetManager") -> bool:
+    """把配置面板中已确认的一次性预设输入同步到预设库。
+
+    只有 ``preset_add_confirm`` 为布尔值 ``True`` 且名称非空时才提交。
+    保存成功后清空名称和三要素输入，并把确认开关复位为 ``False``，
+    保证插件后续重载时不会重复写入。嵌套 ``preset_management`` 配置优先，
+    同时兼容 v1.3.1 之前的顶层平铺配置；保存失败时保留全部原输入。
 
     Args:
         config: AstrBot 配置对象或普通可变字典。
@@ -103,16 +124,32 @@ def sync_panel_preset(config: MutableMapping[str, object], manager: "PresetManag
     Returns:
         本次是否成功处理了一条面板预设。
     """
-    name = str(config.get("preset_add_name", "") or "").strip()
+    group = _panel_preset_group(config)
+    confirmed = _panel_preset_value(
+        config, group, "preset_add_confirm", False
+    )
+    if confirmed is not True:
+        return False
+
+    name = str(
+        _panel_preset_value(config, group, "preset_add_name", "") or ""
+    ).strip()
     if not name:
         return False
 
     target_type = str(
-        config.get("preset_add_target", "custom") or "custom"
+        _panel_preset_value(config, group, "preset_add_target", "custom")
+        or "custom"
     ).strip().lower()
-    artist = str(config.get("preset_add_artist", "") or "").strip()
-    prompt = str(config.get("preset_add_prompt", "") or "").strip()
-    negative = str(config.get("preset_add_negative", "") or "").strip()
+    artist = str(
+        _panel_preset_value(config, group, "preset_add_artist", "") or ""
+    ).strip()
+    prompt = str(
+        _panel_preset_value(config, group, "preset_add_prompt", "") or ""
+    ).strip()
+    negative = str(
+        _panel_preset_value(config, group, "preset_add_negative", "") or ""
+    ).strip()
 
     manager.save(
         name=name,
@@ -131,7 +168,8 @@ def sync_panel_preset(config: MutableMapping[str, object], manager: "PresetManag
         "preset_add_prompt",
         "preset_add_negative",
     ):
-        config[field_name] = ""
+        group[field_name] = ""
+    group["preset_add_confirm"] = False
     return True
 
 

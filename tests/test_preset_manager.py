@@ -268,14 +268,36 @@ class TestPresetManager(unittest.TestCase):
         self.assertTrue(self.mgr.delete("扩展内置"))
         self.assertIsNone(self.mgr.get("扩展内置"))
 
-    def test_panel_add_clears_fields_and_is_idempotent(self):
-        """面板添加成功后清空一次性输入，后续重载不重复提交。"""
+    def test_panel_add_requires_confirmation(self):
+        """名称非空但未打开确认开关时不得写入预设。"""
         config = {
-            "preset_add_target": "custom",
-            "preset_add_name": "面板预设",
-            "preset_add_artist": "panel artist",
-            "preset_add_prompt": "panel prompt",
-            "preset_add_negative": "panel negative",
+            "preset_management": {
+                "preset_add_target": "custom",
+                "preset_add_name": "未确认预设",
+                "preset_add_artist": "artist",
+                "preset_add_prompt": "prompt",
+                "preset_add_negative": "negative",
+                "preset_add_confirm": False,
+            }
+        }
+
+        self.assertFalse(sync_panel_preset(config, self.mgr))
+        self.assertIsNone(self.mgr.get("未确认预设"))
+        self.assertEqual(
+            config["preset_management"]["preset_add_name"], "未确认预设"
+        )
+
+    def test_panel_add_clears_fields_and_is_idempotent(self):
+        """确认添加成功后清空并复位，后续重载不重复提交。"""
+        config = {
+            "preset_management": {
+                "preset_add_target": "custom",
+                "preset_add_name": "面板预设",
+                "preset_add_artist": "panel artist",
+                "preset_add_prompt": "panel prompt",
+                "preset_add_negative": "panel negative",
+                "preset_add_confirm": True,
+            }
         }
 
         self.assertTrue(sync_panel_preset(config, self.mgr))
@@ -285,18 +307,39 @@ class TestPresetManager(unittest.TestCase):
         self.assertEqual(saved["artist"], "panel artist")
         self.assertEqual(saved["prompt"], "panel prompt")
         self.assertEqual(saved["negative"], "panel negative")
+        group = config["preset_management"]
         for field_name in (
             "preset_add_name",
             "preset_add_artist",
             "preset_add_prompt",
             "preset_add_negative",
         ):
-            self.assertEqual(config[field_name], "")
+            self.assertEqual(group[field_name], "")
+        self.assertIs(group["preset_add_confirm"], False)
 
         custom_file = self.temp_dir / "custom_presets.json"
         first_contents = custom_file.read_text(encoding="utf-8")
         self.assertFalse(sync_panel_preset(config, self.mgr))
         self.assertEqual(custom_file.read_text(encoding="utf-8"), first_contents)
+
+    def test_panel_add_supports_confirmed_legacy_flat_config(self):
+        """旧版顶层平铺字段在显式确认后仍可保存。"""
+        config = {
+            "preset_add_target": "builtin",
+            "preset_add_name": "旧版面板预设",
+            "preset_add_artist": "legacy artist",
+            "preset_add_prompt": "legacy prompt",
+            "preset_add_negative": "legacy negative",
+            "preset_add_confirm": True,
+        }
+
+        self.assertTrue(sync_panel_preset(config, self.mgr))
+        saved = self.mgr.get("旧版面板预设")
+        self.assertIsNotNone(saved)
+        self.assertEqual(saved["type"], "builtin")
+        self.assertEqual(saved["artist"], "legacy artist")
+        self.assertEqual(config["preset_add_name"], "")
+        self.assertIs(config["preset_add_confirm"], False)
 
     def test_panel_add_preserves_fields_on_validation_error(self):
         """面板尝试覆盖出厂预设失败时保留输入，方便用户修改。"""
@@ -306,12 +349,14 @@ class TestPresetManager(unittest.TestCase):
             "preset_add_artist": "should not overwrite",
             "preset_add_prompt": "keep prompt",
             "preset_add_negative": "keep negative",
+            "preset_add_confirm": True,
         }
 
         with self.assertRaises(ValueError):
             sync_panel_preset(config, self.mgr)
         self.assertEqual(config["preset_add_name"], "2.5D唯美风")
         self.assertEqual(config["preset_add_artist"], "should not overwrite")
+        self.assertIs(config["preset_add_confirm"], True)
         self.assertEqual(
             self.mgr.get("2.5D唯美风")["artist"],
             FACTORY_PRESETS["2.5D唯美风"]["artist"],

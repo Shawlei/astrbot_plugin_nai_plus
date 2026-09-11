@@ -315,6 +315,19 @@ def _materialize_image(ref: str) -> str:
     raise ValueError(f"认不出的图片引用格式: {text[:80]}")
 
 
+def _config_group(config: dict, group_name: str) -> dict:
+    """Return a schema object group, or an empty dict for legacy configs."""
+    group = config.get(group_name, {})
+    return group if isinstance(group, dict) else {}
+
+
+def _merged_config(config: dict, group_name: str) -> dict:
+    """Overlay a schema object group onto legacy top-level configuration."""
+    merged = dict(config)
+    merged.update(_config_group(config, group_name))
+    return merged
+
+
 def _parse_command_names(value) -> list[str]:
     """解析自定义命令名配置。
 
@@ -367,25 +380,40 @@ class Nai2ApiPlugin(Star):
         self.config = config
         self.data_dir = StarTools.get_data_dir(PLUGIN_NAME)
 
-        api_url = str(config.get("api_url", "https://nai.sta1n.cn")).strip()
-        token = str(config.get("token", "")).strip()
-        timeout = int(config.get("timeout", 120))
-        max_cached = int(config.get("max_cached_images", 50))
+        basic_config = _merged_config(config, "basic_settings")
+        quality_config = _merged_config(config, "quality_safety")
+        preset_config = _merged_config(config, "preset_management")
+        translation_config = _merged_config(config, "translation")
+        img2img_group = _config_group(config, "img2img")
+        system_config = _merged_config(config, "system_tools")
+
+        api_url = str(basic_config.get("api_url", "https://nai.sta1n.cn")).strip()
+        token = str(basic_config.get("token", "")).strip()
+        timeout = int(basic_config.get("timeout", 120))
+        max_cached = int(quality_config.get("max_cached_images", 50))
 
         self.client = Nai2ApiClient(
             api_url=api_url,
             token=token,
-            default_size=str(config.get("default_size", "竖图")),
-            default_model=str(config.get("default_model", "nai-diffusion-4-5-full")),
-            default_steps=int(config.get("default_steps", 28)),
-            default_scale=int(config.get("default_scale", 6)),
-            default_cfg=float(config.get("default_cfg", 0)),
-            default_sampler=str(config.get("default_sampler", "k_dpmpp_2m_sde")),
-            default_negative=str(config.get("default_negative", DEFAULT_NEGATIVE)),
-            default_artist=str(config.get("default_artist", DEFAULT_ARTIST)),
-            default_noise_schedule=str(config.get("default_noise_schedule", "karras")),
-            allow_2k=bool(config.get("allow_2k", True)),
-            allow_4k=bool(config.get("allow_4k", True)),
+            default_size=str(basic_config.get("default_size", "竖图")),
+            default_model=str(
+                basic_config.get("default_model", "nai-diffusion-4-5-full")
+            ),
+            default_steps=int(basic_config.get("default_steps", 28)),
+            default_scale=int(basic_config.get("default_scale", 6)),
+            default_cfg=float(basic_config.get("default_cfg", 0)),
+            default_sampler=str(
+                basic_config.get("default_sampler", "k_dpmpp_2m_sde")
+            ),
+            default_negative=str(
+                preset_config.get("default_negative", DEFAULT_NEGATIVE)
+            ),
+            default_artist=str(preset_config.get("default_artist", DEFAULT_ARTIST)),
+            default_noise_schedule=str(
+                basic_config.get("default_noise_schedule", "karras")
+            ),
+            allow_2k=bool(quality_config.get("allow_2k", True)),
+            allow_4k=bool(quality_config.get("allow_4k", True)),
             timeout=timeout,
         )
 
@@ -399,25 +427,36 @@ class Nai2ApiPlugin(Star):
         self._sync_panel_preset()
 
         # 提示词直译（中文/英文 → 英文标签）
-        self.translator = TranslateManager(config, context)
-        self._translate_enabled = bool(config.get("translate_enabled", True))
+        self.translator = TranslateManager(translation_config, context)
+        self._translate_enabled = bool(
+            translation_config.get("translate_enabled", True)
+        )
         self._translate_on_error = str(
-            config.get("translate_on_error", "fallback")
+            translation_config.get("translate_on_error", "fallback")
         ).strip().lower()
 
-        # 图生图（独立渠道，配置在 img2img 分组里）
-        self._img2img_enabled = bool(config.get("img2img_enabled", False))
-        img2img_conf = config.get("img2img") or {}
-        if not isinstance(img2img_conf, dict):
-            img2img_conf = {}
-        self.img2img = Img2ImgClient(img2img_conf)
+        # 图生图外层与渠道参数都位于同一个可折叠配置组。
+        self._img2img_enabled = bool(
+            img2img_group.get(
+                "img2img_enabled", config.get("img2img_enabled", False)
+            )
+        )
+        nested_img2img = img2img_group.get("img2img")
+        if isinstance(nested_img2img, dict):
+            img2img_config = nested_img2img
+        else:
+            legacy_img2img = config.get("img2img", {})
+            img2img_config = legacy_img2img if isinstance(legacy_img2img, dict) else {}
+        self.img2img = Img2ImgClient(img2img_config)
 
-        self._llm_tool_enabled = bool(config.get("llm_tool_enabled", True))
-        self._show_image_info = bool(config.get("show_image_info", True))
-        self._confirm_hd = bool(config.get("confirm_hd_size", True))
+        self._llm_tool_enabled = bool(system_config.get("llm_tool_enabled", True))
+        self._show_image_info = bool(quality_config.get("show_image_info", True))
+        self._confirm_hd = bool(quality_config.get("confirm_hd_size", True))
 
         # 自定义命令名/别名（默认 nai）
-        self.command_names = _parse_command_names(config.get("command_names", "nai"))
+        self.command_names = _parse_command_names(
+            system_config.get("command_names", "nai")
+        )
         self.command_name = self.command_names[0]
         # 待确认的生图请求（V5 普通尺寸 / 2K / 4K），key 为会话标识
         self._pending_hd: dict[str, dict] = {}
@@ -430,22 +469,20 @@ class Nai2ApiPlugin(Star):
         self._register_extra_commands()
 
     def _sync_panel_preset(self) -> bool:
-        """保存配置面板提交的预设，并在成功后清空一次性输入。
+        """保存配置面板中通过确认开关提交的一次性预设。
 
-        AstrBot 的插件 Schema 没有自定义按钮回调。这里把面板自身的
-        “保存配置并重载插件”作为明确的确认动作：仅在名称非空时写入一次，
-        然后同步清空名称和三要素，避免后续重载重复提交。若配置对象提供
-        ``save_config``，同时把清空状态持久化；普通 ``dict`` 仍可用于测试。
+        只有 ``preset_add_confirm`` 为 ``True`` 且名称非空时才写入。
+        成功后 helper 会清空名称和三要素并复位确认开关；若配置对象提供
+        ``save_config``，再持久化这个清空状态。嵌套折叠组与旧版顶层配置
+        均由 ``sync_panel_preset`` 兼容处理。
 
         Returns:
             本次是否成功处理了一条面板预设。
         """
-        add_name = str(self.config.get("preset_add_name", "") or "").strip()
-        if not add_name:
-            return False
-
+        preset_config = _merged_config(self.config, "preset_management")
+        add_name = str(preset_config.get("preset_add_name", "") or "").strip()
         add_target = str(
-            self.config.get("preset_add_target", "custom") or "custom"
+            preset_config.get("preset_add_target", "custom") or "custom"
         ).strip().lower()
         try:
             saved = sync_panel_preset(self.config, self.presets)
@@ -688,8 +725,13 @@ class Nai2ApiPlugin(Star):
         拉不到就返回空列表，配置面板会退化成普通输入框，用户手填模型名即可。
         """
         config = kwargs.get("config") or self.config or {}
-        base_url = str(config.get("translate_openai_base_url", "") or "").strip()
-        api_key = str(config.get("translate_openai_api_key", "") or "").strip()
+        translation_config = _merged_config(config, "translation")
+        base_url = str(
+            translation_config.get("translate_openai_base_url", "") or ""
+        ).strip()
+        api_key = str(
+            translation_config.get("translate_openai_api_key", "") or ""
+        ).strip()
         if not base_url:
             return []
 
@@ -702,7 +744,9 @@ class Nai2ApiPlugin(Star):
             return []
 
         # 把当前已经填的值也带上，避免保存后选项列表里没有自己导致显示空白
-        current = str(config.get("translate_openai_model", "") or "").strip()
+        current = str(
+            translation_config.get("translate_openai_model", "") or ""
+        ).strip()
         if current and current not in models:
             models.insert(0, current)
         return models

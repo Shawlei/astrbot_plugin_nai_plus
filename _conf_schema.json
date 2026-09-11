@@ -1,5 +1,9 @@
 {
-  "api_url": {
+  "basic_settings": {
+    "description": "基础连接与生图设置",
+    "type": "object",
+    "items": {
+      "api_url": {
     "description": "基础连接与生图｜Nai2API 服务地址",
     "hint": "填写你的 Nai2API 服务地址，例如 https://nai.sta1n.cn",
     "type": "string",
@@ -112,10 +116,16 @@
     "slider": {
       "min": 30,
       "max": 600,
-      "step": 10
+          "step": 10
+        }
+      }
     }
   },
-  "confirm_hd_size": {
+  "quality_safety": {
+    "description": "高扣点防误扣与画质安全",
+    "type": "object",
+    "items": {
+      "confirm_hd_size": {
     "description": "画质安全｜高扣点生图二次确认",
     "hint": "开启后，2K(15点)/4K(25点) 以及 V5 模型的普通尺寸(5点) 会先询问确认再生成，防止误扣",
     "type": "bool",
@@ -147,10 +157,16 @@
     "slider": {
       "min": 10,
       "max": 500,
-      "step": 1
+          "step": 1
+        }
+      }
     }
   },
-  "preset_add_target": {
+  "preset_management": {
+    "description": "预设管理",
+    "type": "object",
+    "items": {
+      "preset_add_target": {
     "description": "预设管理｜添加预设类型",
     "hint": "选择保存到自定义预设库或用户扩展内置预设库；系统出厂预设始终受保护。",
     "type": "string",
@@ -188,7 +204,25 @@
     "type": "text",
     "default": ""
   },
-  "default_artist": {
+      "preset_add_confirm": {
+        "description": "确认添加预设",
+        "hint": "填写上方四项后，将此项打开为 true，再保存配置确认添加；成功后自动复位 false 并清空上方四项。",
+        "type": "bool",
+        "default": false
+      },
+      "preset_manage_name": {
+        "description": "已保存的用户预设名称",
+        "hint": "紧接添加区域，便于手填或复制预设名。该输入框不是操作按钮，也不承诺实时下拉；聊天中发送 /nai presets <预设名> 查看详情，发送 /nai del <预设名> 删除。出厂预设不可删除。",
+        "type": "string",
+        "default": ""
+      },
+      "preset_preview": {
+        "description": "预设预览说明",
+        "hint": "此字段仅为说明，不是实时预览或操作按钮。请复制上方预设名，在聊天中发送 /nai presets <预设名> 查看质量前缀、正向词和负面词；发送 /nai del <预设名> 删除用户预设。",
+        "type": "text",
+        "default": "预览：/nai presets <预设名>\n删除：/nai del <预设名>"
+      },
+      "default_artist": {
     "description": "预设管理｜全局默认画师串/质量前缀",
     "hint": "留空则不传画师串。Nai2API 默认使用 2.5D唯美风，可通过 -p 预设切换",
     "type": "text",
@@ -198,9 +232,15 @@
     "description": "默认负面提示词",
     "hint": "使用 NovelAI 官方推荐的负面提示词，留空则不传",
     "type": "text",
-    "default": "{{{{bad anatomy}}}},{bad feet},bad hands,{{{bad proportions}}},{blurry},cloned face,cropped,{{{deformed}}},{{{disfigured}}},error,{{{extra arms}}},{extra digit},{{{extra legs}}},extra limbs,{{extra limbs}},{fewer digits},{{{fused fingers}}},gross proportions,jpeg artifacts,{{{{long neck}}}},low quality,{malformed limbs},{{missing arms}},{missing fingers},{{missing legs}},mutated hands,{{{mutation}}},normal quality,poorly drawn face,poorly drawn hands,signature,text,{{too many fingers}},{{{ugly}}},username,watermark,worst quality"
+        "default": "{{{{bad anatomy}}}},{bad feet},bad hands,{{{bad proportions}}},{blurry},cloned face,cropped,{{{deformed}}},{{{disfigured}}},error,{{{extra arms}}},{extra digit},{{{extra legs}}},extra limbs,{{extra limbs}},{fewer digits},{{{fused fingers}}},gross proportions,jpeg artifacts,{{{{long neck}}}},low quality,{malformed limbs},{{missing arms}},{missing fingers},{{missing legs}},mutated hands,{{{mutation}}},normal quality,poorly drawn face,poorly drawn hands,signature,text,{{too many fingers}},{{{ugly}}},username,watermark,worst quality"
+      }
+    }
   },
-  "translate_enabled": {
+  "translation": {
+    "description": "提示词直译与二次元角色查表",
+    "type": "object",
+    "items": {
+      "translate_enabled": {
     "description": "提示词直译与角色查表｜开启提示词直译",
     "hint": "开启后，中文/英文提示词都会先交给翻译模型转成 NovelAI 可识别的英文标签再生成",
     "type": "bool",
@@ -315,21 +355,27 @@
       "fallback",
       "abort"
     ],
-    "default": "fallback"
+        "default": "fallback"
+      }
+    }
   },
-  "img2img_enabled": {
+  "img2img": {
+    "description": "图生图渠道（通用 HTTP 模板）",
+    "type": "object",
+    "items": {
+      "img2img_enabled": {
     "description": "图生图渠道｜开启图生图",
     "hint": "开启后，回复一张图片再发指令即可用它作为参考图。注意：Nai2API 网关本身没有图生图接口，这里需要你自己填一个支持图生图的渠道（详见 README）",
     "type": "bool",
     "default": false
   },
-  "img2img": {
-    "description": "图生图渠道",
-    "condition": {
-      "img2img_enabled": true
-    },
-    "type": "object",
-    "items": {
+      "img2img": {
+        "description": "图生图渠道参数",
+        "condition": {
+          "img2img_enabled": true
+        },
+        "type": "object",
+        "items": {
       "base_url": {
         "description": "接口地址",
         "hint": "完整地址，例如 https://api.openai.com/v1/images/edits 或 http://127.0.0.1:7860/sdapi/v1/img2img。插件不会自动补路径，请照渠道文档填全",
@@ -426,9 +472,15 @@
         }
       }
     }
+      }
+    }
   },
-  "command_names": {
-    "description": "系统指令与 LLM 工具｜命令名（自定义前缀/别名）",
+  "system_tools": {
+    "description": "系统指令与 LLM 智能体工具",
+    "type": "object",
+    "items": {
+      "command_names": {
+        "description": "命令名（自定义前缀/别名）",
     "hint": "填写触发指令的名字，多个用英文逗号分隔，例如：nai 或 nai,niu,绘。改完需要重载插件生效。「/」或「+」这类前缀符号是 AstrBot 的全局设置（data/cmd_config.json 里的 wake_prefix），插件无法单独修改；如果你把前缀设成 + ，这里填 nai，实际指令就是 +nai",
     "type": "string",
     "default": "nai"
@@ -436,15 +488,9 @@
   "llm_tool_enabled": {
     "description": "允许 LLM 调用生图",
     "hint": "关闭后 LLM 无法调用 nai_generate 工具",
-    "type": "bool",
-    "default": true
-  },
-  "preset_manage_name": {
-    "description": "预设管理｜选择已保存的用户预设",
-    "hint": "此选择器只用于选定或复制名称，不会直接查看或删除。聊天中发送 /nai presets 预设名 查看详情，发送 /nai del 预设名 删除；出厂预设不可删除。",
-    "type": "string",
-    "options": [],
-    "apply_provider_default": true,
-    "default": ""
+        "type": "bool",
+        "default": true
+      }
+    }
   }
 }
