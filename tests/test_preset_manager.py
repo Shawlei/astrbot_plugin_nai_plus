@@ -13,7 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from core.preset_manager import PresetManager, FACTORY_PRESETS
+from core.preset_manager import FACTORY_PRESETS, PresetManager, sync_panel_preset
 
 
 class TestPresetManager(unittest.TestCase):
@@ -210,6 +210,141 @@ class TestPresetManager(unittest.TestCase):
         cmd_negative_explicit = "custom_negative"
         final_neg_override = cmd_negative_explicit if cmd_negative_explicit is not None else preset_info.get("negative")
         self.assertEqual(final_neg_override, "custom_negative")
+
+    def test_precedence_and_hierarchy(self):
+        """测试预设优先级层级：自定义优先于用户内置，两者均不可破坏出厂预设"""
+        # 1. 保存同名的用户内置预设与自定义预设
+        self.mgr.save(
+            name="双重预设",
+            artist="builtin_artist",
+            prompt="builtin_prompt",
+            target_type="builtin",
+        )
+        self.mgr.save(
+            name="双重预设",
+            artist="custom_artist",
+            prompt="custom_prompt",
+            target_type="custom",
+        )
+
+        # get() 应该优先返回自定义预设
+        got = self.mgr.get("双重预设")
+        self.assertIsNotNone(got)
+        self.assertEqual(got["artist"], "custom_artist")
+        self.assertEqual(got["type"], "custom")
+
+        # 删除预设：按名称一次性彻底清除（包括自定义与用户内置）
+        self.assertTrue(self.mgr.delete("双重预设"))
+        self.assertIsNone(self.mgr.get("双重预设"))
+
+        # 再次删除返回 False
+        self.assertFalse(self.mgr.delete("双重预设"))
+
+    def test_user_builtin_delete_and_update(self):
+        """测试用户扩展内置预设的修改与删除"""
+        self.mgr.save(
+            name="扩展内置",
+            artist="old_builtin_artist",
+            prompt="old_prompt",
+            target_type="builtin",
+        )
+        self.assertTrue(self.mgr.is_builtin("扩展内置"))
+        self.assertFalse(self.mgr.is_factory_builtin("扩展内置"))
+
+        # 修改
+        self.assertTrue(
+            self.mgr.update(
+                "扩展内置",
+                artist="new_builtin_artist",
+                negative="new_negative",
+            )
+        )
+        got = self.mgr.get("扩展内置")
+        self.assertEqual(got["artist"], "new_builtin_artist")
+        self.assertEqual(got["prompt"], "old_prompt")
+        self.assertEqual(got["negative"], "new_negative")
+
+        # 删除
+        self.assertTrue(self.mgr.delete("扩展内置"))
+        self.assertIsNone(self.mgr.get("扩展内置"))
+
+    def test_panel_add_clears_fields_and_is_idempotent(self):
+        """面板添加成功后清空一次性输入，后续重载不重复提交。"""
+        config = {
+            "preset_add_target": "custom",
+            "preset_add_name": "面板预设",
+            "preset_add_artist": "panel artist",
+            "preset_add_prompt": "panel prompt",
+            "preset_add_negative": "panel negative",
+        }
+
+        self.assertTrue(sync_panel_preset(config, self.mgr))
+        saved = self.mgr.get("面板预设")
+        self.assertIsNotNone(saved)
+        self.assertEqual(saved["type"], "custom")
+        self.assertEqual(saved["artist"], "panel artist")
+        self.assertEqual(saved["prompt"], "panel prompt")
+        self.assertEqual(saved["negative"], "panel negative")
+        for field_name in (
+            "preset_add_name",
+            "preset_add_artist",
+            "preset_add_prompt",
+            "preset_add_negative",
+        ):
+            self.assertEqual(config[field_name], "")
+
+        custom_file = self.temp_dir / "custom_presets.json"
+        first_contents = custom_file.read_text(encoding="utf-8")
+        self.assertFalse(sync_panel_preset(config, self.mgr))
+        self.assertEqual(custom_file.read_text(encoding="utf-8"), first_contents)
+
+    def test_panel_add_preserves_fields_on_validation_error(self):
+        """面板尝试覆盖出厂预设失败时保留输入，方便用户修改。"""
+        config = {
+            "preset_add_target": "builtin",
+            "preset_add_name": "2.5D唯美风",
+            "preset_add_artist": "should not overwrite",
+            "preset_add_prompt": "keep prompt",
+            "preset_add_negative": "keep negative",
+        }
+
+        with self.assertRaises(ValueError):
+            sync_panel_preset(config, self.mgr)
+        self.assertEqual(config["preset_add_name"], "2.5D唯美风")
+        self.assertEqual(config["preset_add_artist"], "should not overwrite")
+        self.assertEqual(
+            self.mgr.get("2.5D唯美风")["artist"],
+            FACTORY_PRESETS["2.5D唯美风"]["artist"],
+        )
+
+    def test_preset_detail_view_formatting(self):
+        """测试单预设详情查看时的三要素排版格式化"""
+        # 1. 出厂内置预设详情
+        info_factory = self.mgr.get("2.5D唯美风")
+        self.assertIsNotNone(info_factory)
+        artist_val = info_factory.get("artist", "") or "(无)"
+        prompt_val = info_factory.get("prompt", "") or "(无)"
+        negative_val = info_factory.get("negative", "") or "(无)"
+        self.assertTrue(bool(artist_val))
+        self.assertEqual(prompt_val, "(无)")
+        self.assertEqual(negative_val, "(无)")
+
+        # 2. 自定义预设三要素详情
+        self.mgr.save(
+            name="完整预设",
+            artist="my_artist",
+            prompt="my_prompt",
+            negative="my_negative",
+            target_type="custom",
+            desc="这是一个完整的测试预设",
+        )
+        info_custom = self.mgr.get("完整预设")
+        self.assertIsNotNone(info_custom)
+        tag = "内置" if self.mgr.is_builtin("完整预设") else "自定义"
+        self.assertEqual(tag, "自定义")
+        self.assertEqual(info_custom["artist"], "my_artist")
+        self.assertEqual(info_custom["prompt"], "my_prompt")
+        self.assertEqual(info_custom["negative"], "my_negative")
 
 
 if __name__ == "__main__":

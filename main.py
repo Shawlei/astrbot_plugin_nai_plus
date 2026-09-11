@@ -41,7 +41,7 @@ from .core.nai2api_client import (
     get_generation_cost,
     resolve_model_alias,
 )
-from .core.preset_manager import PresetManager
+from .core.preset_manager import PresetManager, sync_panel_preset
 from .core.translate_manager import TranslateManager, TranslateError
 
 # 解析用户输入中的尺寸前缀、-p/--preset、--artist 和 --negative 参数
@@ -396,38 +396,7 @@ class Nai2ApiPlugin(Star):
         )
 
         self.presets = PresetManager(self.data_dir)
-
-        # 面板添加预设自动同步检测
-        add_name = str(config.get("preset_add_name", "") or "").strip()
-        if add_name:
-            add_target = str(config.get("preset_add_target", "custom") or "custom").strip()
-            add_artist = str(config.get("preset_add_artist", "") or "").strip()
-            add_prompt = str(config.get("preset_add_prompt", "") or "").strip()
-            add_negative = str(config.get("preset_add_negative", "") or "").strip()
-            try:
-                self.presets.save(
-                    name=add_name,
-                    artist=add_artist,
-                    prompt=add_prompt,
-                    negative=add_negative,
-                    target_type=add_target,
-                    desc=f"通过配置面板添加的{'内置' if add_target == 'builtin' else '自定义'}预设",
-                )
-                logger.info(
-                    "[Nai2API] 已通过配置面板自动同步并保存预设 '%s' (目标库: %s)",
-                    add_name,
-                    add_target,
-                )
-                self.config["preset_add_name"] = ""
-                self.config["preset_add_artist"] = ""
-                self.config["preset_add_prompt"] = ""
-                self.config["preset_add_negative"] = ""
-            except Exception as e:
-                logger.warning("[Nai2API] 通过配置面板自动同步预设 '%s' 失败: %s", add_name, e)
-
-        # 刷新面板只读查看列表
-        self.config["view_builtin_presets"] = self.presets.format_preset_list("builtin")
-        self.config["view_custom_presets"] = self.presets.format_preset_list("custom")
+        self._sync_panel_preset()
 
         # 提示词直译（中文/英文 → 英文标签）
         self.translator = TranslateManager(config, context)
@@ -459,6 +428,72 @@ class Nai2ApiPlugin(Star):
         # filter.command 是在类定义时（导入阶段）执行的，那时候还读不到用户配置，
         # 所以配置里的额外名字只能在这里补救：给每个别名动态挂一个同逻辑的处理器。
         self._register_extra_commands()
+
+    def _sync_panel_preset(self) -> bool:
+        """保存配置面板提交的预设，并在成功后清空一次性输入。
+
+        AstrBot 的插件 Schema 没有自定义按钮回调。这里把面板自身的
+        “保存配置并重载插件”作为明确的确认动作：仅在名称非空时写入一次，
+        然后同步清空名称和三要素，避免后续重载重复提交。若配置对象提供
+        ``save_config``，同时把清空状态持久化；普通 ``dict`` 仍可用于测试。
+
+        Returns:
+            本次是否成功处理了一条面板预设。
+        """
+        add_name = str(self.config.get("preset_add_name", "") or "").strip()
+        if not add_name:
+            return False
+
+        add_target = str(
+            self.config.get("preset_add_target", "custom") or "custom"
+        ).strip().lower()
+        try:
+            saved = sync_panel_preset(self.config, self.presets)
+        except (OSError, TypeError, ValueError) as error:
+            logger.warning(
+                "[Nai2API] 通过配置面板保存预设 '%s' 失败: %s",
+                add_name,
+                error,
+            )
+            return False
+
+        if not saved:
+            return False
+
+        save_config = getattr(self.config, "save_config", None)
+        if callable(save_config):
+            try:
+                save_config()
+            except (OSError, TypeError, ValueError) as error:
+                logger.warning(
+                    "[Nai2API] 预设已保存，但清空面板输入持久化失败: %s", error
+                )
+
+        logger.info(
+            "[Nai2API] 已通过配置面板保存预设 '%s' (目标库: %s)",
+            add_name,
+            add_target,
+        )
+        return True
+
+    def preset_manage_name(self, value: str = "", **kwargs) -> list[str]:
+        """返回配置面板中可选择的用户预设名称。
+
+        选择器只帮助用户选择/复制名称；查看和删除仍由明确的聊天指令完成，
+        避免把普通输入框伪装成按钮。系统出厂预设不可删除，因此不列入其中。
+        """
+        names = sorted(
+            set(self.presets.list_custom())
+            | {
+                name
+                for name in self.presets.list_builtin()
+                if not self.presets.is_factory_builtin(name)
+            }
+        )
+        current = str(value or "").strip()
+        if current and current not in names:
+            names.insert(0, current)
+        return names
 
     def _register_extra_commands(self) -> None:
         """把配置里的额外命令名注册成别名。

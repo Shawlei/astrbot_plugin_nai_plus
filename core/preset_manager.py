@@ -10,6 +10,7 @@
 向下兼容历史旧格式。
 """
 
+from collections.abc import MutableMapping
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -86,6 +87,52 @@ def _normalize_entry(raw: dict | str, default_type: str = "custom") -> dict[str,
         "desc": str(raw.get("desc", "") or "").strip() or f"{'内置' if entry_type == 'builtin' else '自定义'}预设",
         "type": entry_type,
     }
+
+
+def sync_panel_preset(config: MutableMapping[str, object], manager: "PresetManager") -> bool:
+    """把配置面板的一次性预设输入同步到预设库。
+
+    只有名称非空时才提交；保存成功后清空名称和三要素输入。这样面板的
+    “保存配置并重载”可作为可靠确认动作，下一次重载不会再次新增同一批输入。
+    保存失败时保留原输入，方便用户修正后重试。
+
+    Args:
+        config: AstrBot 配置对象或普通可变字典。
+        manager: 负责分层存储的预设管理器。
+
+    Returns:
+        本次是否成功处理了一条面板预设。
+    """
+    name = str(config.get("preset_add_name", "") or "").strip()
+    if not name:
+        return False
+
+    target_type = str(
+        config.get("preset_add_target", "custom") or "custom"
+    ).strip().lower()
+    artist = str(config.get("preset_add_artist", "") or "").strip()
+    prompt = str(config.get("preset_add_prompt", "") or "").strip()
+    negative = str(config.get("preset_add_negative", "") or "").strip()
+
+    manager.save(
+        name=name,
+        artist=artist,
+        prompt=prompt,
+        negative=negative,
+        target_type=target_type,
+        desc=(
+            "通过配置面板添加的"
+            f"{'用户内置' if target_type == 'builtin' else '自定义'}预设"
+        ),
+    )
+    for field_name in (
+        "preset_add_name",
+        "preset_add_artist",
+        "preset_add_prompt",
+        "preset_add_negative",
+    ):
+        config[field_name] = ""
+    return True
 
 
 class PresetManager:
@@ -309,8 +356,8 @@ class PresetManager:
         return True
 
     def format_preset_list(self, target: str = "all") -> str:
-        """生成排版精美的文本摘要，供配置面板只读查看和聊天指令使用。
-        
+        """生成预设文本摘要，供聊天指令查看。
+
         Args:
             target: "all" (全部), "builtin" (仅内置), "custom" (仅自定义)
         """
@@ -320,7 +367,7 @@ class PresetManager:
         # 1. 内置预设部分
         if target in ("all", "builtin"):
             builtins = self.list_builtin()
-            lines: list[str] = ["═════════【内置预设库】═════════"]
+            lines: list[str] = ["【内置预设库】"]
             if not builtins:
                 lines.append("  (暂无内置预设)")
             else:
@@ -339,7 +386,7 @@ class PresetManager:
         # 2. 自定义预设部分
         if target in ("all", "custom"):
             customs = self.list_custom()
-            lines = ["═════════【自定义预设库】═════════"]
+            lines = ["【自定义预设库】"]
             if not customs:
                 lines.append("  (暂无自定义预设，可在配置面板添加或使用 /nai save <名称> <质量前缀> 保存)")
             else:

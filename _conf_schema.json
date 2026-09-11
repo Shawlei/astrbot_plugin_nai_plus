@@ -1,12 +1,6 @@
 {
-  "section_1_basic_settings": {
-    "description": "══════════ ❖【板块一：Nai2API 基础连接与生图设置】❖ ══════════",
-    "hint": "配置 Nai2API 网关服务地址、Token密钥、默认模型、默认图片尺寸与采样参数",
-    "type": "string",
-    "default": "———— 基础连接与生图参数设置 ————"
-  },
   "api_url": {
-    "description": "Nai2API 服务地址",
+    "description": "基础连接与生图｜Nai2API 服务地址",
     "hint": "填写你的 Nai2API 服务地址，例如 https://nai.sta1n.cn",
     "type": "string",
     "default": "https://nai.sta1n.cn"
@@ -121,14 +115,8 @@
       "step": 10
     }
   },
-  "section_2_security": {
-    "description": "══════════ ❖【板块二：高扣点防误扣与画质安全】❖ ══════════",
-    "hint": "高扣点（V5 普通尺寸 5 点 / 2K 15 点 / 4K 25 点）防误扣二次确认、生成权限与缓存管理",
-    "type": "string",
-    "default": "———— 高扣点防误扣与画质安全设置 ————"
-  },
   "confirm_hd_size": {
-    "description": "高扣点生图二次确认",
+    "description": "画质安全｜高扣点生图二次确认",
     "hint": "开启后，2K(15点)/4K(25点) 以及 V5 模型的普通尺寸(5点) 会先询问确认再生成，防止误扣",
     "type": "bool",
     "default": true
@@ -162,15 +150,9 @@
       "step": 1
     }
   },
-  "section_3_presets": {
-    "description": "══════════ ❖【板块三：画风预设管理（可视化添加与查看）】❖ ══════════",
-    "hint": "在此可视化添加预设（选择内置或自定义，填写质量前缀、正向词、负面词），并可实时查看内置与自定义预设列表",
-    "type": "string",
-    "default": "———— 画风预设管理（可视化添加与查看） ————"
-  },
   "preset_add_target": {
-    "description": "➕ 添加预设：类型选择器（内置/自定义）",
-    "hint": "选择要添加到的目标库：custom 为自定义预设库，builtin 为扩展内置预设库",
+    "description": "预设管理｜添加预设类型",
+    "hint": "选择保存到自定义预设库或用户扩展内置预设库；系统出厂预设始终受保护。",
     "type": "string",
     "options": [
       "custom",
@@ -183,43 +165,31 @@
     "default": "custom"
   },
   "preset_add_name": {
-    "description": "➕ 添加预设：预设名称",
-    "hint": "填写要添加的预设名称（例如「赛博朋克风」、「清新水彩」等）。填写后点击保存配置即可生效",
+    "description": "预设管理｜添加预设名称",
+    "hint": "必填。填写名称和下方三要素后点击 AstrBot 的保存配置；插件重载时执行一次保存，成功后自动清空本次名称及三要素输入。",
     "type": "string",
     "default": ""
   },
   "preset_add_artist": {
-    "description": "➕ 添加预设：质量前缀 (Quality / Artist)",
+    "description": "预设管理｜质量前缀 (Quality / Artist)",
     "hint": "画风预设的画师串或质量前缀标签，例如 0.9::misaka_12003-gou::, dino, year 2025, masterpiece 等",
     "type": "text",
     "default": ""
   },
   "preset_add_prompt": {
-    "description": "➕ 添加预设：正向提示词 (Positive Prompt)",
+    "description": "预设管理｜正向提示词 (Positive Prompt)",
     "hint": "可选。该预设自带的正向特征提示词，生图时自动与用户的提示词拼接",
     "type": "text",
     "default": ""
   },
   "preset_add_negative": {
-    "description": "➕ 添加预设：负面提示词 (Negative Prompt)",
+    "description": "预设管理｜负面提示词 (Negative Prompt)",
     "hint": "可选。该预设特定的负面提示词，生图时优先使用该专属负面词",
     "type": "text",
     "default": ""
   },
-  "view_builtin_presets": {
-    "description": "👀 查看所有【内置预设】列表",
-    "hint": "只读展示系统出厂与用户新增的所有内置预设三要素（质量前缀、正向词、负向词）",
-    "type": "text",
-    "default": "═════════【内置预设库】═════════\n▶ 2.5D唯美风 [出厂内置] - 2.5D唯美风（Nai2API 默认）\n  • 质量前缀: 0.9::misaka_12003-gou ::, dino_(dinoartforame), wanke, liduke, year 2025, realistic, 4k, -2::green ::, textless version, The image is highly intricate finished drawn. Only the character's face is in anime style, but their body is in realistic style. 1.35::A highly finished photo-style artwork that has lively color, graphic texture, realistic skin surface, and lifelike flesh with little obliques::. 1.63::photorealistic::, 1.63::photo(medium)::, \\n20::best quality, absurdres, very aesthetic, detailed, masterpiece::,, very aesthetic, masterpiece, no text,\n  • 正向词: (无)\n  • 负向词: (无)\n\n▶ 韩漫小清新风 [出厂内置] - 韩漫小清新风格\n  • 质量前缀: [[[artist:dishwasher1910]]], {{yd_(orange_maru)}}, [artist:ciloranko], [artist:sho_(sho_lwlw)], [ningen mame], year 2024,\n  • 正向词: (无)\n  • 负向词: (无)\n\n▶ 本子动漫风 [出厂内置] - 本子动漫风格\n  • 质量前缀: 1.4::asanagi::,{{{{{artist:asanagi}}}}},1.2::xiaoluo_xl::,1.3::Artist: misaka_12003-gou::,1.2::Artist:shexyo::,0.7::Artist:b.sa_(bbbs)::,1::Artist:qiandaiyiyu::,1.05::artist:natedecock::,1.05::artist:kunaboto::,0.75::artist:kandata_nijou::,1.05::artist:zer0.zer0 ::,1.05::artist:jasony::,0.75::misaka_12003-gou ::, dino_(dinoartforame), wanke, liduke, year 2025, realistic, 4k, -2::green ::, {textless version, The image is highly intricate finished drawn,write realistically,true to life}, 1.35::A highly finished photo-style artwork that has lively color, graphic texture, realistic skin surface, and lifelike flesh with little obliques::, 1.63::photorealistic::,3::age slider::,1.63::photo(medium)::, 2::best quality, absurdres, very aesthetic, detailed, masterpiece::,-4::Muscle definition, abs::\n  • 正向词: (无)\n  • 负向词: (无)\n\n▶ GalGame风 [出厂内置] - GalGame 风格\n  • 质量前缀: artist:ningen_mame,, noyu_(noyu23386566),, toosaka asagi,, location,\\n20::best quality, absurdres, very aesthetic, detailed, masterpiece::,:,, very aesthetic, masterpiece, no text,\n  • 正向词: (无)\n  • 负向词: (无)\n\n▶ 动漫风 [出厂内置] - 动漫风（旧版画师混合）\n  • 质量前缀: artist collaboration, 0.70::artist:necomi ::, 0.80::artist:tan (tangent) ::, 1.38::artist:kanda done ::, 1.22::artist:quasarcake ::, 1.22::artist:atdan ::, 0.94::artist:fuumi (radial engine) ::, 1.70::artist:john kafka ::, 0.60::artist:meisansan ::, 0.98::artist:ogipote ::, 0.44::artist:nixeu ::, 0.74::artist:mignon ::, 0.94::artist:rangu ::, 1.18::artist:hiten (hitenkei) ::, 1.24::artist:freng ::, 0.56::artist:miwabe sakura ::, year 2024, perspective\n  • 正向词: (无)\n  • 负向词: (无)"
-  },
-  "view_custom_presets": {
-    "description": "👀 查看所有【自定义预设】列表",
-    "hint": "只读展示所有用户自定义添加的预设详情（通过上方添加或 /nai save 保存的预设）",
-    "type": "text",
-    "default": "═════════【自定义预设库】═════════\n  (暂无自定义预设，可在上方输入预设三要素并保存配置添加，或在聊天中发送 /nai save 添加)"
-  },
   "default_artist": {
-    "description": "默认画师串/质量前缀",
+    "description": "预设管理｜全局默认画师串/质量前缀",
     "hint": "留空则不传画师串。Nai2API 默认使用 2.5D唯美风，可通过 -p 预设切换",
     "type": "text",
     "default": "0.9::misaka_12003-gou ::, dino_(dinoartforame), wanke, liduke, year 2025, realistic, 4k, -2::green ::, textless version, The image is highly intricate finished drawn. Only the character's face is in anime style, but their body is in realistic style. 1.35::A highly finished photo-style artwork that has lively color, graphic texture, realistic skin surface, and lifelike flesh with little obliques::. 1.63::photorealistic::, 1.63::photo(medium)::, \\n20::best quality, absurdres, very aesthetic, detailed, masterpiece::,, very aesthetic, masterpiece, no text,"
@@ -230,14 +200,8 @@
     "type": "text",
     "default": "{{{{bad anatomy}}}},{bad feet},bad hands,{{{bad proportions}}},{blurry},cloned face,cropped,{{{deformed}}},{{{disfigured}}},error,{{{extra arms}}},{extra digit},{{{extra legs}}},extra limbs,{{extra limbs}},{fewer digits},{{{fused fingers}}},gross proportions,jpeg artifacts,{{{{long neck}}}},low quality,{malformed limbs},{{missing arms}},{missing fingers},{{missing legs}},mutated hands,{{{mutation}}},normal quality,poorly drawn face,poorly drawn hands,signature,text,{{too many fingers}},{{{ugly}}},username,watermark,worst quality"
   },
-  "section_4_translate": {
-    "description": "══════════ ❖【板块四：提示词直译与二次元角色查表】❖ ══════════",
-    "hint": "自然语言提示词自动翻译为英文 Danbooru 标签，400+ 二次元热门角色名 0 延迟查表秒出 Tag",
-    "type": "string",
-    "default": "———— 提示词直译与二次元角色查表设置 ————"
-  },
   "translate_enabled": {
-    "description": "开启提示词直译",
+    "description": "提示词直译与角色查表｜开启提示词直译",
     "hint": "开启后，中文/英文提示词都会先交给翻译模型转成 NovelAI 可识别的英文标签再生成",
     "type": "bool",
     "default": true
@@ -270,13 +234,12 @@
   },
   "translate_provider_ids": {
     "description": "翻译模型（AstrBot 模式）",
-    "hint": "点右边按钮直接从 AstrBot 已配置的模型里勾选，可以勾多个：按顺序轮询，前一个失败自动换下一个。留空则自动使用 AstrBot 里所有可用的对话模型",
+    "hint": "填写 AstrBot 中已配置的对话模型 provider ID，可添加多个并按顺序轮询；留空则自动使用所有可用对话模型。",
     "type": "list",
     "items": {
       "type": "string"
     },
-    "default": [],
-    "_special": "select_providers"
+    "default": []
   },
   "translate_openai_prefill": {
     "description": "OpenAI 接口",
@@ -354,14 +317,8 @@
     ],
     "default": "fallback"
   },
-  "section_5_img2img": {
-    "description": "══════════ ❖【板块五：图生图渠道（通用 HTTP 模板）】❖ ══════════",
-    "hint": "通用 HTTP 模板图生图渠道配置。开启后回复带图消息即可作为参考图发起图生图",
-    "type": "string",
-    "default": "———— 图生图渠道（通用 HTTP 模板） ————"
-  },
   "img2img_enabled": {
-    "description": "开启图生图",
+    "description": "图生图渠道｜开启图生图",
     "hint": "开启后，回复一张图片再发指令即可用它作为参考图。注意：Nai2API 网关本身没有图生图接口，这里需要你自己填一个支持图生图的渠道（详见 README）",
     "type": "bool",
     "default": false
@@ -470,14 +427,8 @@
       }
     }
   },
-  "section_6_system": {
-    "description": "══════════ ❖【板块六：系统指令与 LLM 智能体工具】❖ ══════════",
-    "hint": "配置触发指令名称别名以及是否允许大模型智能体调用生图工具",
-    "type": "string",
-    "default": "———— 系统指令与 LLM 智能体工具 ————"
-  },
   "command_names": {
-    "description": "命令名（自定义前缀/别名）",
+    "description": "系统指令与 LLM 工具｜命令名（自定义前缀/别名）",
     "hint": "填写触发指令的名字，多个用英文逗号分隔，例如：nai 或 nai,niu,绘。改完需要重载插件生效。「/」或「+」这类前缀符号是 AstrBot 的全局设置（data/cmd_config.json 里的 wake_prefix），插件无法单独修改；如果你把前缀设成 + ，这里填 nai，实际指令就是 +nai",
     "type": "string",
     "default": "nai"
@@ -487,5 +438,13 @@
     "hint": "关闭后 LLM 无法调用 nai_generate 工具",
     "type": "bool",
     "default": true
+  },
+  "preset_manage_name": {
+    "description": "预设管理｜选择已保存的用户预设",
+    "hint": "此选择器只用于选定或复制名称，不会直接查看或删除。聊天中发送 /nai presets 预设名 查看详情，发送 /nai del 预设名 删除；出厂预设不可删除。",
+    "type": "string",
+    "options": [],
+    "apply_provider_default": true,
+    "default": ""
   }
 }
