@@ -3,6 +3,135 @@
 > 说明：本仓库自 v1.0.0 起独立计数（原项目基于 helloWKQ/AstrBot_Nai2API 二开，
 > 早期内部迭代过 v1.2.0 / v1.3.x，为对接 AstrBot 插件市场，版本号从 1.0.0 重新开始）。
 
+## v1.2.5
+
+修「张张都是半身」的真正根因。这个问题上一版（v1.2.2）修了一半，这次修完。
+
+### 背景：v1.2.2 修了什么，漏了什么
+
+v1.2.2 修的是「画师串压根没拼进提示词」—— 那时画师串被当成独立请求参数
+发送，整串失效。用户升级后**画风确实生效了**（质感、配色都对），但**依然
+是半身**。说明还有第二个原因。
+
+### 根因：画师串里没有任何「拍到哪」的约束
+
+看用户日志里两串画师串的实际内容：
+
+默认串（`default_artist`）：
+
+    misaka_12003-gou, dino_(dinoartforame), wanke, liduke, year 2025,
+    realistic, 4k, textless version, ... photo-style artwork ...,
+    1.63::photorealistic::, 1.63::photo(medium)::, best quality, ...
+
+`动漫风` 预设：
+
+    artist collaboration, 0.70::artist:necomi ::, ... , year 2024, perspective
+
+把它们按类别拆开：
+
+| 类别 | 内容 |
+|------|------|
+| 画师 | `misaka_12003-gou`、`necomi`、`kanda done` 等 |
+| 年份 | `year 2024` / `year 2025` |
+| 画质 | `realistic`、`4k`、`photorealistic`、`photo(medium)` |
+| 风格描述 | `lively color`、`graphic texture`、`realistic skin surface` |
+| 质量词 | `best quality`、`absurdres`、`masterpiece` |
+| **构图/景别** | **默认串：无；动漫风：只有 `perspective`** |
+
+**画师串负责「什么质感什么画风」，不负责「拍到哪」。** 而用户 prompt 里
+写的 `wuthering_waves, denia_(wuthering_waves), swimsuit` 是「谁 + 穿什么」，
+「拍到哪」也是空的。
+
+两处都没给构图约束时，NovelAI 会退回训练数据的统计偏好 —— 默认就是
+`portrait` / `upper body`。**这就是张张都是半身的机制。**
+
+### 修复一：内置预设补上构图标签
+
+给 5 个内置预设各补一组贴合其风格调性的构图标签。注意不是统一塞
+`full body` —— 每个风格的合适景别不同：
+
+| 预设 | 追加的构图 | 为什么 |
+|------|-----------|--------|
+| `2.5D唯美风` | `cowboy shot, looking at viewer` | photo-style 取向，全身会削弱它的人像质感；七分身兼顾身材与面部细节 |
+| `韩漫小清新风` | `full body, standing, looking at viewer` | 日常小清新，全身最贴 |
+| `本子动漫风` | `cowboy shot, looking at viewer` | 倾向人物特写与身体表现 |
+| `GalGame风` | `full body, standing` | 立绘风本来就该全身 |
+| `动漫风` | `full body, standing` | 原本只有 `perspective`，补上景别 |
+
+`DEFAULT_ARTIST`（用户不指定预设时用的）和 `_conf_schema.json` 里
+`default_artist` 的默认值同步更新，三份保持一致 —— 否则用户换不换预设
+行为会飘。
+
+### 修复二：新增构图兜底（`auto_composition`，默认开启）
+
+预设补了标签，但用户如果自己建了自定义预设（多半不会写构图），问题依旧。
+所以再加一层兜底：**当提示词和画师串都没给构图约束时，自动补
+`full body, standing`。**
+
+判断逻辑在 `has_composition()`，识别这些关键词：
+
+- 景别：`full body` / `upper body` / `cowboy shot` / `portrait` / `wide shot` / `close-up` / `face focus` …
+- 视角：`from above` / `from behind` / `dutch angle` / `three quarter view` / `perspective` …
+- 姿势：`standing` / `sitting` / `lying` / `looking at viewer` …
+- 中文：`全身` / `半身` / `胸像` / `特写` / `立绘` / `构图` / `站姿` / `远景` / `俯视` …
+
+**三条重要边界**（都有测试覆盖）：
+
+1. **用户明确要半身时不插手** —— 提示词里写了 `upper body` / `半身` /
+   `portrait`，兜底就不补。不会把「我就想画头像」强行改成全身。
+2. **幂等** —— 补过的串再跑一次不会重复追加。
+3. **可关闭** —— `auto_composition = false` 完全关掉这层。
+
+### 修复三：画师串里的负权重移到负面提示词
+
+排查时发现的另一个问题。Nai2API 官方预设把**负权重**写在了正向画师串里：
+
+    2.5D唯美风:  ..., realistic, 4k, -2::green ::, textless version, ...
+    本子动漫风:  ..., realistic, 4k, -2::green ::, ...
+                 ..., 2::best quality, ..., -4::Muscle definition, abs::
+
+`-2::green::` 的语义是「强烈抑制绿色」。写在正向串里有两个害处：
+
+1. NAI 的正向 prompt 里出现负权重是畸形写法，会干扰同一串里其他标签的
+   注意力分配；
+2. 它是**无差别压制绿色** —— 画粉发角色没感觉，但画**绿发角色**
+   （原神纳西妲、蓝档案的绿系角色等）时会把角色本身的发色/瞳色一起压掉，
+   属于「预设和角色打架」。
+
+修复：新增 `split_negative_weights()`，把 `-N::tag::` 从正向串里提取出来，
+由调用方拼进 `negative`。提取**不改变权重数值**（`-2` 提取后仍是 `-2`），
+且是幂等的 —— 用户自定义预设里如果也写了负权重，同样会被处理。
+
+日志新增两行便于排查：
+
+    [Nai2API] 画师串里的负权重已移入负面: -2::green::
+    [Nai2API] 未检测到构图标签，已补默认景别: full body, standing
+
+### 测试
+
+新增 `test_composition.py`，**64 项断言**，覆盖：
+
+- 负权重提取（含「正权重 `1.35::` 不被误提取」「空串」「纯负权重串」边界）
+- 构图检测（英文/中文关键词，含线上那条失败 prompt）
+- 构图兜底（核心场景、用户要半身时不插手、幂等、空 prompt）
+- 预设与默认串三份一致性
+- 组合场景：完全复刻线上那两次真实调用
+
+全量回归 **13 个测试文件、527 项断言，0 失败**。
+
+### 升级后怎么验证
+
+发一次 `#nai 鸣潮 达妮娅 泳装`，日志里应该能看到：
+
+    [Nai2API] 画师串里的负权重已移入负面: -2::green::
+    [Nai2API] 提示词: ..., cowboy shot, looking at viewer, wuthering_waves, denia_(...), swimsuit
+
+重点是 `cowboy shot`（或 `full body`）出现在 prompt 末尾 —— 那就是景别
+约束生效的标志。
+
+如果想固定画头像，把 `auto_composition` 关掉，或直接在提示词里写
+`半身` / `胸像` / `特写`（词库都能查到）。
+
 ## v1.2.4
 
 这一版全部来自一次真实群聊的日志排查，修了 4 个问题、补了 3 类词。

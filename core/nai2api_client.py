@@ -13,6 +13,12 @@ import aiohttp
 
 from astrbot.api import logger
 
+from .preset_manager import (
+    DEFAULT_COMPOSITION,
+    ensure_composition,
+    split_negative_weights,
+)
+
 
 # Nai2API 支持的尺寸（含 2K/4K）
 SIZE_MAP = {
@@ -140,7 +146,7 @@ def get_generation_cost(model: str | None, size: str | None) -> int:
 
 
 # Nai2API 官方默认 artist（2.5D唯美风，来自 store.js defaultArtist2_5D）
-DEFAULT_ARTIST = "0.9::misaka_12003-gou ::, dino_(dinoartforame), wanke, liduke, year 2025, realistic, 4k, -2::green ::, textless version, The image is highly intricate finished drawn. Only the character's face is in anime style, but their body is in realistic style. 1.35::A highly finished photo-style artwork that has lively color, graphic texture, realistic skin surface, and lifelike flesh with little obliques::. 1.63::photorealistic::, 1.63::photo(medium)::, \\n20::best quality, absurdres, very aesthetic, detailed, masterpiece::,, very aesthetic, masterpiece, no text,"
+DEFAULT_ARTIST = "0.9::misaka_12003-gou ::, dino_(dinoartforame), wanke, liduke, year 2025, realistic, 4k, -2::green ::, textless version, The image is highly intricate finished drawn. Only the character's face is in anime style, but their body is in realistic style. 1.35::A highly finished photo-style artwork that has lively color, graphic texture, realistic skin surface, and lifelike flesh with little obliques::. 1.63::photorealistic::, 1.63::photo(medium)::, \\n20::best quality, absurdres, very aesthetic, detailed, masterpiece::,, very aesthetic, masterpiece, no text, cowboy shot, looking at viewer"
 DEFAULT_NEGATIVE = (
     "{{{{bad anatomy}}}},{bad feet},bad hands,{{{bad proportions}}},"
     "{blurry},cloned face,cropped,{{{deformed}}},{{{disfigured}}},"
@@ -171,6 +177,7 @@ class Nai2ApiClient:
         default_negative: str = DEFAULT_NEGATIVE,
         default_artist: str = "",
         default_noise_schedule: str = "karras",
+        auto_composition: bool = True,
         allow_2k: bool = True,
         allow_4k: bool = True,
         timeout: int = 120,
@@ -186,6 +193,7 @@ class Nai2ApiClient:
         self.default_negative = default_negative
         self.default_artist = default_artist
         self.default_noise_schedule = default_noise_schedule
+        self.auto_composition = auto_composition
         self.allow_2k = allow_2k
         self.allow_4k = allow_4k
         self.timeout = timeout
@@ -287,6 +295,31 @@ class Nai2ApiClient:
         final_artist = artist if artist is not None else self.default_artist
         final_noise_schedule = noise_schedule or self.default_noise_schedule
 
+        # --- 负权重分离 ---
+        # 预设里混着的 `-2::green::` 这类负权重，语义上是负面约束，
+        # 被写在 artist（正向串）里。提取出来挪到 negative，
+        # 否则会无差别压制该颜色 —— 画绿发角色时会把角色本身的发色压掉。
+        final_artist, artist_negative = split_negative_weights(final_artist or "")
+        if artist_negative:
+            final_negative = (
+                f"{final_negative}, {artist_negative}" if final_negative
+                else artist_negative
+            )
+
+        # --- 构图兜底 ---
+        # NovelAI 在没有任何构图标签时，会退回训练数据的统计偏好 ——
+        # 默认出 portrait / upper body。这就是「张张都是半身」的根因：
+        # 画师串只管风格质感，用户 prompt 常只写「谁 + 穿什么」，
+        # 「拍到哪」是空的。
+        #
+        # 注意顺序：必须在负权重分离**之后**判断，
+        # 因为画师串本身有时含 `perspective` 这类构图词。
+        # 由 auto_composition 配置开关控制（默认开启）。
+        composed = False
+        prompt_body = prompt
+        if self.auto_composition:
+            prompt_body, composed = ensure_composition(prompt, final_artist or "")
+
         # 画师串必须拼进 tag —— 否则它等于没生效。
         #
         # 这里踩过一个坑：原先把画师串单独放在 `artist` 请求参数里发出去，
@@ -297,7 +330,7 @@ class Nai2ApiClient:
         #
         # 顺序：画师串在前（含质量词与画风，属于全局风格），
         #       用户提示词在后（描述具体画面内容）。这也是 NAI 的常见写法。
-        final_prompt = prompt.strip()
+        final_prompt = prompt_body.strip()
         if final_artist and final_artist.strip():
             final_prompt = f"{final_artist.strip()}, {final_prompt}"
 
@@ -326,6 +359,10 @@ class Nai2ApiClient:
         )
         if final_artist and final_artist.strip():
             logger.info("[Nai2API] 画师串: %s", final_artist.strip())
+        if artist_negative:
+            logger.info("[Nai2API] 画师串里的负权重已移入负面: %s", artist_negative)
+        if composed:
+            logger.info("[Nai2API] 未检测到构图标签，已补默认景别: %s", DEFAULT_COMPOSITION)
         logger.info("[Nai2API] 提示词: %s", final_prompt)
         logger.debug("[Nai2API] 请求 URL: %s", url.replace(self.token, "***") if self.token else url)
 

@@ -393,6 +393,7 @@ class Nai2ApiPlugin(Star):
             default_negative=str(config.get("default_negative", DEFAULT_NEGATIVE)),
             default_artist=str(config.get("default_artist", DEFAULT_ARTIST)),
             default_noise_schedule=str(config.get("default_noise_schedule", "karras")),
+            auto_composition=bool(config.get("auto_composition", True)),
             allow_2k=bool(config.get("allow_2k", True)),
             allow_4k=bool(config.get("allow_4k", True)),
             timeout=timeout,
