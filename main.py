@@ -78,7 +78,8 @@ _NEGATIVE_PATTERN = re.compile(
 
 HELP_TEXT = (
     "用法: /{cmd} [尺寸] <提示词> [-p <预设>] [-m <模型>] [--artist <质量前缀>] [--negative <负面>] [--seed <种子>]\n"
-    "预设: /{cmd} presets(预设) | /{cmd} save(保存) <名称> <质量前缀> | /{cmd} update(修改) <名称> <新前缀> | /{cmd} del(删除) <名称>\n"
+    "预设: /{cmd} presets(预设) [名称] | /{cmd} save(保存) <名称> <质量前缀> | /{cmd} update(修改) <名称> <新前缀> | /{cmd} del(删除) <名称>\n"
+    "      （保存/修改支持扩展参数：--prompt 正向词 --negative 负面词 --type builtin|custom）\n"
     "余额: /{cmd} balance(余额/点数/次数)\n"
     "尺寸: 竖图|横图|方图|2K竖图|2K横图|2K方图|4K竖图|4K横图|4K方图\n"
     "模型: 5(V5) | 4.5 | 4 | 3 | furry | 2 | safe   —— 也可写全名 nai-diffusion-5-full\n\n"
@@ -90,23 +91,16 @@ HELP_TEXT = (
     "  V4.5 普通尺寸 = 1 点    V5 普通尺寸 = 5 点\n"
     "  2K = 15 点              4K = 25 点\n"
     "  高扣点会先让你确认一次，避免误扣\n\n"
-    "中文/英文提示词都会自动直译成英文标签再生成\n\n"
+    "中文/英文提示词都会自动直译成英文标签，二次元角色名支持 0 延迟秒出 Tag\n\n"
     "示例:\n"
     "  /{cmd} 1girl, silver hair\n"
-    "  /{cmd} 一个银发女孩                          (中文直接写，自动翻译)\n"
+    "  /{cmd} 流萤 站在星空下                       (角色查表+中文直译)\n"
     "  /{cmd} -m 5 -p 动漫风 1girl, silver hair     (用 V5 + 动漫风预设)\n"
-    "  /{cmd} -p 高质量 1girl, silver hair\n"
-    "  /{cmd} 2K竖图 -p 动漫风 1girl, silver hair\n"
-    "  /{cmd} 1girl --artist best quality, absurdres\n"
-    "  /{cmd} 1girl --negative bad anatomy, bad hands\n"
-    "  /{cmd} 1girl --seed 12345\n"
-    "  (回复一张图) /{cmd} 换个背景 --strength 0.6      (图生图)\n"
-    "  /{cmd} save 我的预设 best quality, absurdres, detailed\n"
-    "  /{cmd} 保存 我的预设 best quality, absurdres, detailed\n"
-    "  /{cmd} update 我的预设 best quality, masterpiece\n"
-    "  /{cmd} 修改 我的预设 best quality, masterpiece\n"
-    "  /{cmd} del 我的预设\n"
-    "  /{cmd} 删除 我的预设\n"
+    "  /{cmd} 2K竖图 -p 2.5D唯美风 1girl\n"
+    "  /{cmd} presets                               (查看所有内置与自定义预设)\n"
+    "  /{cmd} presets 2.5D唯美风                    (查看单个预设三要素)\n"
+    "  /{cmd} save 我的预设 best quality, absurdres\n"
+    "  /{cmd} save 赛博风 artist:cyber --prompt neon lights --negative blurry --type custom\n"
     "  /{cmd} balance"
 )
 
@@ -403,6 +397,38 @@ class Nai2ApiPlugin(Star):
 
         self.presets = PresetManager(self.data_dir)
 
+        # 面板添加预设自动同步检测
+        add_name = str(config.get("preset_add_name", "") or "").strip()
+        if add_name:
+            add_target = str(config.get("preset_add_target", "custom") or "custom").strip()
+            add_artist = str(config.get("preset_add_artist", "") or "").strip()
+            add_prompt = str(config.get("preset_add_prompt", "") or "").strip()
+            add_negative = str(config.get("preset_add_negative", "") or "").strip()
+            try:
+                self.presets.save(
+                    name=add_name,
+                    artist=add_artist,
+                    prompt=add_prompt,
+                    negative=add_negative,
+                    target_type=add_target,
+                    desc=f"通过配置面板添加的{'内置' if add_target == 'builtin' else '自定义'}预设",
+                )
+                logger.info(
+                    "[Nai2API] 已通过配置面板自动同步并保存预设 '%s' (目标库: %s)",
+                    add_name,
+                    add_target,
+                )
+                self.config["preset_add_name"] = ""
+                self.config["preset_add_artist"] = ""
+                self.config["preset_add_prompt"] = ""
+                self.config["preset_add_negative"] = ""
+            except Exception as e:
+                logger.warning("[Nai2API] 通过配置面板自动同步预设 '%s' 失败: %s", add_name, e)
+
+        # 刷新面板只读查看列表
+        self.config["view_builtin_presets"] = self.presets.format_preset_list("builtin")
+        self.config["view_custom_presets"] = self.presets.format_preset_list("custom")
+
         # 提示词直译（中文/英文 → 英文标签）
         self.translator = TranslateManager(config, context)
         self._translate_enabled = bool(config.get("translate_enabled", True))
@@ -564,7 +590,7 @@ class Nai2ApiPlugin(Star):
             "nai_get_balance": ["detail"],
             "nai_list_presets": ["preset_name"],
             "nai_save_preset": ["name", "artist"],
-            "nai_update_preset": ["name", "artist"],
+            "nai_update_preset": ["name"],
             "nai_delete_preset": ["name"],
         }
 
@@ -651,7 +677,7 @@ class Nai2ApiPlugin(Star):
         if artist is not None:
             return artist
         if preset_name is not None:
-            resolved = self.presets.get(preset_name)
+            resolved = self.presets.get_artist(preset_name)
             if resolved is not None:
                 return resolved
         return None
@@ -825,12 +851,24 @@ class Nai2ApiPlugin(Star):
         if not prompt:
             return event.plain_result("提示词不能为空")
 
-        # 解析 artist（预设 + --artist 优先级）
-        final_artist = self._resolve_artist(preset_name, artist)
-
-        # 预设不存在时提示
-        if preset_name and self.presets.get(preset_name) is None and artist is None:
+        # 检查预设是否存在
+        preset_info = self.presets.get(preset_name) if preset_name else None
+        if preset_name and preset_info is None and artist is None:
             return event.plain_result(f"预设 '{preset_name}' 不存在，使用 /nai presets(预设) 查看可用预设")
+
+        # 解析 artist（--artist 覆盖预设）
+        final_artist = artist if artist is not None else (preset_info.get("artist") if preset_info else None)
+
+        # 联动解析 prompt：若预设配置了正向词，自动与提示词智能拼接
+        if preset_info and preset_info.get("prompt"):
+            preset_prompt = preset_info["prompt"].strip()
+            if preset_prompt and preset_prompt.lower() not in prompt.lower():
+                prompt = f"{prompt}, {preset_prompt}"
+
+        # 联动解析 negative：若用户未指定 --negative，优先使用预设专属 negative
+        final_negative = negative
+        if final_negative is None and preset_info and preset_info.get("negative"):
+            final_negative = preset_info["negative"].strip()
 
         # ---- 图生图判定 ----
         # 规则：--no-i2i 强制文生图；--i2i 强制图生图；都不写就看回复消息里有没有图
@@ -877,7 +915,7 @@ class Nai2ApiPlugin(Star):
                 "prompt": prompt,
                 "size": size,
                 "artist": final_artist,
-                "negative": negative,
+                "negative": final_negative,
                 "seed": seed,
                 "preset": preset_name,
                 "model": model,
@@ -900,7 +938,7 @@ class Nai2ApiPlugin(Star):
             await event.send(event.plain_result(trans_err))
 
         return await self._run_generate_command(
-            event, prompt, size, final_artist, negative, seed, preset_name, model,
+            event, prompt, size, final_artist, final_negative, seed, preset_name, model,
             ref_image_path=ref_image_path, strength=strength, noise=noise,
         )
 
@@ -1037,75 +1075,117 @@ class Nai2ApiPlugin(Star):
         return "\n".join(lines)
 
     def _handle_presets(self, event: AstrMessageEvent, preset_name: str = ""):
-        """处理预设列表 / 查看单个预设"""
-        all_presets = self.presets.list_all()
-        
+        """处理预设列表 / 查看单个预设三要素详情"""
         if preset_name:
-            if preset_name in all_presets:
-                info = all_presets[preset_name]
-                builtin_tag = " [内置]" if self.presets.is_builtin(preset_name) else ""
+            info = self.presets.get(preset_name)
+            if info:
+                is_builtin = self.presets.is_builtin(preset_name)
+                tag = "内置" if is_builtin else "自定义"
                 desc = info.get("desc", "")
-                artist_val = info.get("artist", "")
+                artist_val = info.get("artist", "") or "(无)"
+                prompt_val = info.get("prompt", "") or "(无)"
+                negative_val = info.get("negative", "") or "(无)"
+                content = (
+                    f"类型: 【{tag}预设】\n"
+                    f"说明: {desc}\n\n"
+                    f"【质量前缀 (Quality / Artist)】:\n{artist_val}\n\n"
+                    f"【正向提示词 (Positive Prompt)】:\n{prompt_val}\n\n"
+                    f"【负面提示词 (Negative Prompt)】:\n{negative_val}"
+                )
                 return self._forward_result(
                     event,
-                    f"预设 '{preset_name}'{builtin_tag}",
-                    f"描述: {desc}\n质量前缀:\n{artist_val}"
+                    f"预设 '{preset_name}' 详情",
+                    content,
                 )
             else:
                 return event.plain_result(f"预设 '{preset_name}' 不存在，使用 /nai presets 查看可用预设")
-        
-        if not all_presets:
-            return event.plain_result("暂无预设")
 
-        lines = []
-        for name, info in all_presets.items():
-            builtin_tag = " [内置]" if self.presets.is_builtin(name) else ""
-            desc = info.get("desc", "")
-            artist_val = info.get("artist", "")
-            lines.append(f"{name}{builtin_tag} - {desc}")
-            lines.append(f"  {artist_val[:80]}{'...' if len(artist_val) > 80 else ''}")
-            lines.append("")
+        formatted = self.presets.format_preset_list("all")
+        if not formatted:
+            return event.plain_result("暂无可用预设")
 
-        lines.append("使用: /nai -p <预设名> <提示词>")
-        lines.append("查看单个预设详情: /nai presets <预设名>")
-        return self._forward_result(event, "可用预设列表", "\n".join(lines))
+        footer = (
+            "\n\n使用: /nai -p <预设名> <提示词>\n"
+            "查看单个预设详情: /nai presets <预设名>\n"
+            "保存新预设: /nai save <名称> <质量前缀> [--prompt 正向词] [--negative 负面词] [--type builtin|custom]"
+        )
+        return self._forward_result(event, "可用预设列表（内置 & 自定义）", formatted + footer)
 
     def _handle_save_preset(self, event: AstrMessageEvent, args: str):
-        """保存自定义预设"""
+        """保存预设（支持自定义与扩展内置，支持三要素）"""
         args = args.strip()
         if not args:
-            return event.plain_result("用法: /nai save <名称> <质量前缀>\n示例: /nai save 我的预设 best quality, absurdres, detailed")
+            return event.plain_result(
+                "用法: /nai save <名称> <质量前缀> [--prompt <正向词>] [--negative <负面词>] [--type <custom|builtin>]\n"
+                "示例: /nai save 我的预设 best quality, absurdres\n"
+                "高级示例: /nai save 唯美特化 best quality --prompt 1girl, sakura --negative bad anatomy --type custom"
+            )
+
+        target_type = "custom"
+        type_m = re.search(r'--type\s+(builtin|custom)', args, re.IGNORECASE)
+        if type_m:
+            target_type = type_m.group(1).lower()
+            args = (args[:type_m.start()] + args[type_m.end():]).strip()
+
+        prompt_val = ""
+        prompt_m = re.search(r'--prompt\s+(.+?)(?=\s+--(?:negative|type)\s+|$)', args, re.DOTALL | re.IGNORECASE)
+        if prompt_m:
+            prompt_val = prompt_m.group(1).strip()
+            args = (args[:prompt_m.start()] + args[prompt_m.end():]).strip()
+
+        negative_val = ""
+        neg_m = re.search(r'--negative\s+(.+?)(?=\s+--(?:prompt|type)\s+|$)', args, re.DOTALL | re.IGNORECASE)
+        if neg_m:
+            negative_val = neg_m.group(1).strip()
+            args = (args[:neg_m.start()] + args[neg_m.end():]).strip()
 
         parts = args.split(None, 1)
         if len(parts) < 2:
-            return event.plain_result("用法: /nai save <名称> <质量前缀>\n示例: /nai save 我的预设 best quality, absurdres, detailed")
+            return event.plain_result(
+                "用法: /nai save <名称> <质量前缀> [--prompt 正向词] [--negative 负面词] [--type custom|builtin]\n"
+                "示例: /nai save 我的预设 best quality, absurdres"
+            )
 
         name, artist = parts[0].strip(), parts[1].strip()
         if not name or not artist:
-            return event.plain_result("名称和质量前缀不能为空")
+            return event.plain_result("预设名称和质量前缀不能为空")
 
-        # 内置预设不允许被覆盖：用户以为在「备份自己的组合」，
-        # 实际把内置的 GalGame风 改掉之后，别人（和自己）再 `/nai -p GalGame风`
-        # 拿到的就不是文档里那个效果了，很难排查。改成直接拒绝并指路。
-        if self.presets.is_builtin(name):
+        if self.presets.is_factory_builtin(name):
             return event.plain_result(
-                f"'{name}' 是内置预设，不能覆盖。\n"
-                f"换个名字保存即可，例如：/nai save 我的{name} {artist}"
+                f"'{name}' 是系统出厂内置预设，不能覆盖。\n"
+                f"请换个名字保存，例如：/nai save 我的{name} {artist}"
             )
 
         is_overwrite = self.presets.get(name) is not None
-        self.presets.save(name, artist)
+        try:
+            self.presets.save(
+                name=name,
+                artist=artist,
+                prompt=prompt_val,
+                negative=negative_val,
+                target_type=target_type,
+                desc=f"用户保存的{'内置' if target_type == 'builtin' else '自定义'}预设",
+            )
+        except Exception as e:
+            return event.plain_result(f"保存预设失败: {e}")
+
         action = "已更新" if is_overwrite else "已保存"
-        return event.plain_result(f"{action}预设 '{name}': {artist}")
+        type_label = "内置" if target_type == "builtin" else "自定义"
+        lines = [f"{action}{type_label}预设 '{name}':", f"质量前缀: {artist}"]
+        if prompt_val:
+            lines.append(f"正向词: {prompt_val}")
+        if negative_val:
+            lines.append(f"负面词: {negative_val}")
+        return event.plain_result("\n".join(lines))
 
     def _handle_del_preset(self, event: AstrMessageEvent, args: str):
-        """删除自定义预设"""
+        """删除预设"""
         name = args.strip()
         if not name:
             return event.plain_result("用法: /nai del <名称>")
 
-        if self.presets.is_builtin(name):
-            return event.plain_result(f"'{name}' 是内置预设，无法删除")
+        if self.presets.is_factory_builtin(name):
+            return event.plain_result(f"'{name}' 是系统出厂内置预设，无法删除")
 
         if self.presets.delete(name):
             return event.plain_result(f"已删除预设 '{name}'")
@@ -1113,30 +1193,45 @@ class Nai2ApiPlugin(Star):
             return event.plain_result(f"预设 '{name}' 不存在")
 
     def _handle_update_preset(self, event: AstrMessageEvent, args: str):
-        """修改自定义预设"""
+        """修改已有预设"""
         args = args.strip()
         if not args:
             return event.plain_result(
-                "用法: /nai update <名称> <新的质量前缀>\n"
-                "示例: /nai update 我的预设 best quality, absurdres, detailed"
+                "用法: /nai update <名称> <新的质量前缀> [--prompt 新正向词] [--negative 新负面词]\n"
+                "示例: /nai update 我的预设 best quality, masterpiece"
             )
+
+        prompt_val = None
+        prompt_m = re.search(r'--prompt\s+(.+?)(?=\s+--negative\s+|$)', args, re.DOTALL | re.IGNORECASE)
+        if prompt_m:
+            prompt_val = prompt_m.group(1).strip()
+            args = (args[:prompt_m.start()] + args[prompt_m.end():]).strip()
+
+        negative_val = None
+        neg_m = re.search(r'--negative\s+(.+?)(?=\s+--prompt\s+|$)', args, re.DOTALL | re.IGNORECASE)
+        if neg_m:
+            negative_val = neg_m.group(1).strip()
+            args = (args[:neg_m.start()] + args[neg_m.end():]).strip()
 
         parts = args.split(None, 1)
-        if len(parts) < 2:
-            return event.plain_result(
-                "用法: /nai update <名称> <新的质量前缀>\n"
-                "示例: /nai update 我的预设 best quality, absurdres, detailed"
-            )
+        name = parts[0].strip() if parts else ""
+        artist = parts[1].strip() if len(parts) > 1 else None
 
-        name, artist = parts[0].strip(), parts[1].strip()
-        if not name or not artist:
-            return event.plain_result("名称和质量前缀不能为空")
+        if not name:
+            return event.plain_result("预设名称不能为空")
 
-        if self.presets.is_builtin(name):
-            return event.plain_result(f"'{name}' 是内置预设，无法修改")
+        if self.presets.is_factory_builtin(name):
+            return event.plain_result(f"'{name}' 是系统出厂内置预设，无法修改")
 
-        if self.presets.update(name, artist=artist):
-            return event.plain_result(f"已修改预设 '{name}': {artist}")
+        if self.presets.update(name, artist=artist, prompt=prompt_val, negative=negative_val):
+            lines = [f"已修改预设 '{name}' 成功:"]
+            if artist:
+                lines.append(f"质量前缀: {artist}")
+            if prompt_val is not None:
+                lines.append(f"正向词: {prompt_val}")
+            if negative_val is not None:
+                lines.append(f"负面词: {negative_val}")
+            return event.plain_result("\n".join(lines))
         else:
             return event.plain_result(f"预设 '{name}' 不存在，使用 /nai save 保存新预设")
 
@@ -1211,10 +1306,20 @@ class Nai2ApiPlugin(Star):
                 content=[mcp.types.TextContent(type="text", text=result_text)]
             )
 
-        final_artist = self._resolve_artist(
-            preset.strip() or None,
-            artist.strip() or None,
-        )
+        preset_info = self.presets.get(preset.strip()) if preset.strip() else None
+
+        final_artist = artist.strip() or None
+        if final_artist is None and preset_info:
+            final_artist = preset_info.get("artist")
+
+        if preset_info and preset_info.get("prompt"):
+            preset_prompt = preset_info["prompt"].strip()
+            if preset_prompt and preset_prompt.lower() not in prompt_en.lower():
+                prompt_en = f"{prompt_en}, {preset_prompt}"
+
+        final_negative = negative.strip() or None
+        if final_negative is None and preset_info and preset_info.get("negative"):
+            final_negative = preset_info["negative"].strip()
 
         try:
             seed_int = 0
@@ -1230,7 +1335,7 @@ class Nai2ApiPlugin(Star):
                 prompt_en,
                 size=size.strip() or None,
                 artist=final_artist,
-                negative=negative.strip() or None,
+                negative=final_negative,
                 seed=final_seed,
                 model=final_model,
                 ref_image_path=ref_image_path,
@@ -1288,45 +1393,46 @@ class Nai2ApiPlugin(Star):
 
     @filter.llm_tool(name="nai_list_presets")
     async def nai_list_presets_tool(self, event: AstrMessageEvent, preset_name: str):
-        """列出所有可用预设，或查看单个预设详情。
+        """列出所有可用预设，或查看单个预设详情（包含质量前缀、正向词、负面词）。
 
         Args:
             preset_name(string): 预设名称，填 "all" 或 "全部" 列出所有预设，填具体名称查看单个预设
         """
-        all_presets = self.presets.list_all()
-
-        # 列出所有预设
+        # 查看所有预设
         if preset_name.lower() in ("all", "全部"):
-            if not all_presets:
+            formatted = self.presets.format_preset_list("all")
+            if not formatted:
                 return mcp.types.CallToolResult(
                     content=[mcp.types.TextContent(type="text", text="暂无预设")]
                 )
-
-            lines = []
-            for name, info in all_presets.items():
-                builtin_tag = " [内置]" if self.presets.is_builtin(name) else ""
-                desc = info.get("desc", "")
-                lines.append(f"{name}{builtin_tag} - {desc}")
-
-            result_text = "\n".join(lines)
-            await event.send(self._forward_result(event, "可用预设列表", result_text))
+            await event.send(self._forward_result(event, "可用预设列表（内置 & 自定义）", formatted))
             return mcp.types.CallToolResult(
-                content=[mcp.types.TextContent(type="text", text=result_text)]
+                content=[mcp.types.TextContent(type="text", text=formatted)]
             )
 
         # 查看单个预设
-        if preset_name in all_presets:
-            info = all_presets[preset_name]
-            builtin_tag = " [内置]" if self.presets.is_builtin(preset_name) else ""
+        info = self.presets.get(preset_name)
+        if info:
+            is_builtin = self.presets.is_builtin(preset_name)
+            tag = "内置" if is_builtin else "自定义"
             desc = info.get("desc", "")
-            artist_val = info.get("artist", "")
-            result_text = f"描述: {desc}\n质量前缀:\n{artist_val}"
-            await event.send(self._forward_result(event, f"预设 '{preset_name}'{builtin_tag}", result_text))
+            artist_val = info.get("artist", "") or "(无)"
+            prompt_val = info.get("prompt", "") or "(无)"
+            negative_val = info.get("negative", "") or "(无)"
+            content = (
+                f"类型: 【{tag}预设】\n"
+                f"说明: {desc}\n\n"
+                f"【质量前缀 (Artist)】:\n{artist_val}\n\n"
+                f"【正向提示词 (Prompt)】:\n{prompt_val}\n\n"
+                f"【负面提示词 (Negative)】:\n{negative_val}"
+            )
+            await event.send(self._forward_result(event, f"预设 '{preset_name}' 详情", content))
             return mcp.types.CallToolResult(
-                content=[mcp.types.TextContent(type="text", text=result_text)]
+                content=[mcp.types.TextContent(type="text", text=content)]
             )
         else:
-            result_text = f"预设 '{preset_name}' 不存在，可用预设: {', '.join(all_presets.keys())}"
+            all_names = list(self.presets.list_all().keys())
+            result_text = f"预设 '{preset_name}' 不存在，可用预设: {', '.join(all_names)}"
             await event.send(event.plain_result(result_text))
             return mcp.types.CallToolResult(
                 content=[mcp.types.TextContent(type="text", text=result_text)]
@@ -1338,16 +1444,22 @@ class Nai2ApiPlugin(Star):
         event: AstrMessageEvent,
         name: str,
         artist: str,
+        prompt: str = "",
+        negative: str = "",
+        target_type: str = "custom",
     ):
-        """保存自定义预设。
+        """保存自定义或内置预设。
 
         Args:
             name(string): 预设名称（不能含空格）
             artist(string): 质量前缀/画师串
+            prompt(string): 可选，预设正向提示词
+            negative(string): 可选，预设专属负面提示词
+            target_type(string): 预设库类型，可选 "custom"（自定义预设，默认）或 "builtin"（内置预设）
         """
         name = name.strip()
         artist = artist.strip()
-        
+
         if not name or not artist:
             return mcp.types.CallToolResult(
                 content=[mcp.types.TextContent(type="text", text="预设名称和质量前缀都不能为空")]
@@ -1358,10 +1470,24 @@ class Nai2ApiPlugin(Star):
                 content=[mcp.types.TextContent(type="text", text="预设名称不能包含空格，请使用下划线或其他字符")]
             )
 
+        if self.presets.is_factory_builtin(name):
+            return mcp.types.CallToolResult(
+                content=[mcp.types.TextContent(type="text", text=f"'{name}' 是系统出厂内置预设，禁止覆盖")]
+            )
+
         is_overwrite = self.presets.get(name) is not None
-        self.presets.save(name, artist)
+        norm_type = "builtin" if target_type.strip().lower() == "builtin" else "custom"
+        self.presets.save(
+            name=name,
+            artist=artist,
+            prompt=prompt.strip(),
+            negative=negative.strip(),
+            target_type=norm_type,
+            desc=f"通过工具添加的{'内置' if norm_type == 'builtin' else '自定义'}预设",
+        )
         action = "已更新" if is_overwrite else "已保存"
-        result_text = f"{action}预设 '{name}' 成功"
+        type_str = "内置" if norm_type == "builtin" else "自定义"
+        result_text = f"{action}{type_str}预设 '{name}' 成功"
         await event.send(event.plain_result(result_text))
         return mcp.types.CallToolResult(
             content=[mcp.types.TextContent(type="text", text=result_text)]
@@ -1372,28 +1498,34 @@ class Nai2ApiPlugin(Star):
         self,
         event: AstrMessageEvent,
         name: str,
-        artist: str,
+        artist: str = "",
+        prompt: str = "",
+        negative: str = "",
     ):
-        """修改已有的自定义预设。
+        """修改已有的预设。
 
         Args:
             name(string): 要修改的预设名称
-            artist(string): 新的质量前缀/画师串
+            artist(string): 新的质量前缀/画师串，留空表示不修改
+            prompt(string): 新的正向词，留空表示不修改
+            negative(string): 新的负面词，留空表示不修改
         """
         name = name.strip()
-        artist = artist.strip()
-
-        if not name or not artist:
+        if not name:
             return mcp.types.CallToolResult(
-                content=[mcp.types.TextContent(type="text", text="预设名称和质量前缀都不能为空")]
+                content=[mcp.types.TextContent(type="text", text="预设名称不能为空")]
             )
 
-        if self.presets.is_builtin(name):
+        if self.presets.is_factory_builtin(name):
             return mcp.types.CallToolResult(
-                content=[mcp.types.TextContent(type="text", text=f"'{name}' 是内置预设，无法修改")]
+                content=[mcp.types.TextContent(type="text", text=f"'{name}' 是系统出厂内置预设，无法修改")]
             )
 
-        if self.presets.update(name, artist=artist):
+        artist_val = artist.strip() if artist.strip() else None
+        prompt_val = prompt.strip() if prompt.strip() else None
+        negative_val = negative.strip() if negative.strip() else None
+
+        if self.presets.update(name, artist=artist_val, prompt=prompt_val, negative=negative_val):
             result_text = f"已修改预设 '{name}' 成功"
             await event.send(event.plain_result(result_text))
             return mcp.types.CallToolResult(
@@ -1408,21 +1540,20 @@ class Nai2ApiPlugin(Star):
 
     @filter.llm_tool(name="nai_delete_preset")
     async def nai_delete_preset_tool(self, event: AstrMessageEvent, name: str):
-        """删除自定义预设。
+        """删除预设（系统出厂内置预设受保护无法删除）。
 
         Args:
             name(string): 要删除的预设名称
         """
         name = name.strip()
-        
         if not name:
             return mcp.types.CallToolResult(
                 content=[mcp.types.TextContent(type="text", text="预设名称不能为空")]
             )
 
-        if self.presets.is_builtin(name):
+        if self.presets.is_factory_builtin(name):
             return mcp.types.CallToolResult(
-                content=[mcp.types.TextContent(type="text", text=f"'{name}' 是内置预设，无法删除")]
+                content=[mcp.types.TextContent(type="text", text=f"'{name}' 是系统出厂内置预设，无法删除")]
             )
 
         if self.presets.delete(name):

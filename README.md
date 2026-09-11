@@ -21,6 +21,7 @@
 | 提示词直译（中文/英文 → 英文标签）、翻译模型轮询、`-m` 切模型、自定义命令名 | v1.3.0 (早期) / v1.0.1 |
 | 图生图通用 HTTP 模板支持 | v1.1.0 |
 | 二次元角色名查表替换（400+角色官方Tag/纯角色名0延迟）、Few-shot直译示例、翻译后中文残留校验重试 | v1.2.0 |
+| 配置面板 6 大板块大字隔断平铺排版、预设三要素（质量前缀/正向词/负面词）生图联动、内置与自定义预设分层存储/可视化添加/只读查看 | v1.3.0 |
 
 具体改动见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -29,6 +30,12 @@
 - `/nai` 指令文生图，支持尺寸、预设、模型、质量前缀、负面提示词、随机种子
 - LLM Tool 调用生图（AI 助手可直接调用）
 - 支持 NovelAI V5 最新模型（含 V5 Full / V5 Curated）
+- **配置面板大字板块平铺隔断（全新 1.3.0）**：整洁规范划分 6 大功能板块，不折叠更直观
+- **预设管理与三要素生图联动（全新 1.3.0）**：
+  - 预设支持扩展质量前缀（`artist`）、正向词（`prompt`）、专属负面词（`negative`）
+  - 生图时自动智能拼接预设正向词，自动优先使用预设专属负面词
+  - 内置预设与自定义预设分层持久化存储，出厂内置预设绝对保护
+  - 管理面板提供预设类型选择器、三要素输入框与全量列表查看框
 - **二次元角色名查表替换**：内置 400+ 热门二次元角色名/别名/简称到 Danbooru 官方 Tag 的映射字典，支持自定义词表扩展
 - **纯角色名 0 延迟秒出**：输入纯角色名（如 `/nai 流萤` 或 `/nai 雷电将军和八重神子`）跳过大模型，0 耗时、零 Token 消耗秒出官方 Tag，100% 精确
 - **提示词直译 Few-shot 增强**：系统提示词内嵌 6 组精选示例，完美保留 NovelAI 权重语法（`1.2::tag::`、`{{tag}}`、`[tag]`、`-2::tag::`）及画师标签
@@ -37,7 +44,7 @@
 - **OpenAI 兼容接口配置友好**：地址/密钥分开填，模型可从接口实时拉取下拉选择
 - **自定义命令名**：`/nai` 可以改成 `/niu`、`/绘` 等，支持多个别名
 - **图生图**：回复一张图再发指令即可。后端是**通用 HTTP 模板**，任何支持图生图的渠道都能接
-- 5 个内置预设（来自 Nai2API 官方前端）+ 自定义预设保存/修改/删除
+- 5 个出厂内置预设 + 用户扩展内置预设 + 自定义预设保存/修改/删除
 - 支持普通/2K/4K 分辨率
 - 高扣点二次确认（V5 普通图 5 点、2K 15 点、4K 25 点），防误扣
 - 图片本地缓存，自动清理
@@ -64,43 +71,71 @@
 
 ## 配置
 
-在 AstrBot 管理面板 → 插件配置中填写：
+在 AstrBot 管理面板 → 插件配置中，配置项按 **6 大功能板块** 醒目平铺展开排版（不折叠，一目了然）：
 
+### ❖【板块一：Nai2API 基础连接与生图设置】
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
 | `api_url` | Nai2API 服务地址 | `https://nai.sta1n.cn` |
 | `token` | 用户密钥（必填） | 空 |
 | `default_model` | 默认模型（V5 普通图 5 点，V4.5 普通图 1 点） | `nai-diffusion-5-full` |
 | `default_size` | 默认尺寸 | `竖图` |
-| `default_steps` | 默认步数 | `28` |
-| `default_scale` | 默认提示词引导值 | `6` |
-| `default_cfg` | 默认 CFG rescale（0-1） | `0` |
+| `default_steps` | 默认步数（1-28） | `28` |
+| `default_scale` | 默认提示词引导值（CFG Scale，1-30） | `6` |
+| `default_cfg` | 默认缩放引导值 (CFG rescale，0-1) | `0` |
 | `default_sampler` | 默认采样器 | `k_dpmpp_2m_sde` |
-| `default_negative` | 默认负面提示词 | Nai2API 官方默认 |
-| `default_artist` | 默认画师串/质量前缀 | 2.5D唯美风（Nai2API 官方默认） |
-| `default_noise_schedule` | 默认噪声调度 | `karras` |
+| `default_noise_schedule` | 默认噪声调度（karras / native） | `karras` |
 | `timeout` | 请求超时(秒) | `120` |
-| `llm_tool_enabled` | 允许 LLM 调用生图（AI 助手需要） | `true` |
-| `show_image_info` | 图片信息标签（在图片下方显示预设名和耗时） | `true` |
-| `confirm_hd_size` | 高扣点生图二次确认（V5 普通图、2K、4K） | `true` |
+
+### ❖【板块二：高扣点防误扣与画质安全】
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `confirm_hd_size` | 高扣点生图二次确认（V5 普通图 5 点、2K 15 点、4K 25 点防误扣） | `true` |
 | `allow_2k` | 允许生成 2K 图片（关闭后自动降级为普通尺寸，防误扣 15 点） | `true` |
 | `allow_4k` | 允许生成 4K 图片（关闭后自动降级为普通尺寸，防误扣 25 点） | `true` |
+| `show_image_info` | 图片信息标签（在图片下方显示预设名和耗时） | `true` |
 | `max_cached_images` | 图片最大缓存数 | `50` |
-| `command_names` | 命令名，多个用逗号分隔，如 `nai,niu,绘` | `nai` |
-| `translate_enabled` | 开启提示词直译（中文/英文 → 英文标签） | `true` |
+
+### ❖【板块三：画风预设管理（可视化添加与查看）】
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `preset_add_target` | ➕ 添加预设：目标预设库选择器（`custom` 自定义预设 / `builtin` 内置预设） | `custom` |
+| `preset_add_name` | ➕ 添加预设：预设名称（例如「赛博朋克风」、「水彩手绘风」） | 空 |
+| `preset_add_artist` | ➕ 添加预设：质量前缀 (Quality / Artist) 画师串 | 空 |
+| `preset_add_prompt` | ➕ 添加预设：正向提示词 (Positive Prompt) 可选，生图时自动拼接 | 空 |
+| `preset_add_negative` | ➕ 添加预设：负面提示词 (Negative Prompt) 可选，生图时优先使用 | 空 |
+| `view_builtin_presets` | 👀 查看所有【内置预设】列表（只读展示包含名称、质量前缀、正向词、负面词） | 5大内置预设格式化文本 |
+| `view_custom_presets` | 👀 查看所有【自定义预设】列表（只读展示用户添加或保存的所有自定义预设） | 自定义预设格式化文本 |
+| `default_artist` | 全局默认画师串/质量前缀 | 2.5D唯美风（Nai2API 官方默认） |
+| `default_negative` | 全局默认负面提示词 | Nai2API 官方默认 |
+
+### ❖【板块四：提示词直译与二次元角色查表】
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `translate_enabled` | 开启提示词直译（中文/英文 → 英文 Danbooru 标签） | `true` |
+| `char_mapping_enabled` | 开启角色名查表替换（400+ 角色名 0 延迟秒出 Tag，跳过大模型） | `true` |
+| `custom_characters_file` | 自定义角色映射表路径（支持自定义 JSON 扩展或覆盖角色库） | `data/custom_characters.json` |
 | `translate_mode` | 直译接入方式（下拉选择）：`用 AstrBot 的模型` / `自定义 OpenAI 兼容接口` | 用 AstrBot 的模型 |
 | `translate_provider_ids` | AstrBot 模式的翻译模型，**直接从下拉框勾选**（可多选做轮询）；**留空自动使用 AstrBot 所有可用模型** | 空 |
 | `translate_openai_prefill` | OpenAI 接口预设（下拉选择），选中后自动填好地址和常用模型 | 自定义 |
 | `translate_openai_base_url` | OpenAI 接口地址，填到 `/v1` 为止 | 空 |
 | `translate_openai_api_key` | OpenAI 接口密钥（`sk-xxx`，本地接口可留空） | 空 |
 | `translate_openai_model` | 直译模型，**可从接口实时拉取列表下拉选择**，也可手填 | 空 |
-| `translate_system_prompt` | 直译系统提示词，**已预填内置提示词**，可直接改；清空则恢复内置默认 | 内置提示词 |
+| `translate_system_prompt` | 直译系统提示词，**已预填内置提示词**（含 6 组 Few-shot 示例），清空则恢复内置默认 | 内置提示词 |
 | `translate_timeout` | 单次翻译超时(秒) | `60` |
 | `translate_on_error` | 翻译失败时：`fallback`=用原文继续 / `abort`=终止不生图 | `fallback` |
-| `char_mapping_enabled` | 开启角色名查表替换（二次元角色名自动转官方 Danbooru Tag） | `true` |
-| `custom_characters_file` | 自定义角色映射表路径（支持自定义 JSON 扩展或覆盖角色库） | `data/custom_characters.json` |
+
+### ❖【板块五：图生图渠道（通用 HTTP 模板）】
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
 | `img2img_enabled` | 开启图生图板块（关闭后「图生图」配置块整体隐藏） | `false` |
-| `img2img` | 图生图渠道配置（见下方教程） | 见教程 |
+| `img2img` | 通用 HTTP 模板图生图渠道配置（见下方图生图教程） | 见教程 |
+
+### ❖【板块六：系统指令与 LLM 智能体工具】
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `command_names` | 触发命令名/别名，多个用英文逗号分隔，如 `nai,niu,绘` | `nai` |
+| `llm_tool_enabled` | 允许 LLM 调用生图（AI 助手需要） | `true` |
 
 > **重要**：如果要让 AI 助手自动调用生图，请确保 `llm_tool_enabled` 为 `true`，
 > 并启用 AstrBot 人格中引用的生图助手人格提示词。
@@ -500,19 +535,45 @@ translate_openai_model    = deepseek-chat
 >   - `fallback`（默认）：用原文继续生图，并提示一句
 >   - `abort`：直接终止，避免翻译失败还白白扣点
 
-**预设管理**
+**预设管理体系（全新 1.3.0）**
 
+本插件支持完整的**预设三要素**与**内置/自定义分层体系**：
+
+#### 1. 预设三要素与生图联动
+每个预设均可独立配置三项核心要素：
+- **质量前缀 (Quality / Artist)**：专属画师串或画质修饰词。生图时优先使用预设画师串（指令中使用 `--artist` 可临时覆盖）。
+- **正向提示词 (Positive Prompt)**：可选。该风格特定的正向特征标签（如 `masterpiece, highly detailed, vivid colors`）。生图时会自动与用户输入的提示词智能拼接去重。
+- **负面提示词 (Negative Prompt)**：可选。该风格特定的专属负面词。生图时若用户未显式指定 `--negative`，将**优先使用预设专属负面词**，而非全局默认负面词。
+
+#### 2. 分层预设库与出厂保护
+- **系统出厂内置预设（Factory Builtin）**：硬编码 5 组官方出厂预设（2.5D唯美风、韩漫小清新风、本子动漫风、GalGame风、动漫风），受系统保护，**严禁被覆盖或删除**。
+- **用户扩展内置预设（User Builtin）**：独立保存在 `data/builtin_presets.json` 中，与出厂预设共同构成内置预设库。
+- **用户自定义预设（Custom）**：独立保存在 `data/custom_presets.json` 中（历史 `presets.json` 自动向下兼容迁移）。
+
+#### 3. 在 Web 管理面板中可视化添加与查看
+在 AstrBot 插件配置面板的【板块三：画风预设管理】中：
+1. **类型选择器（preset_add_target）**：下拉选择添加到「自定义预设」还是「内置预设」。
+2. **填写预设信息**：
+   - 预设名称 (`preset_add_name`)
+   - 质量前缀 (`preset_add_artist`)
+   - 正向提示词 (`preset_add_prompt`，可选)
+   - 负面提示词 (`preset_add_negative`，可选)
+3. 点击「保存配置」并重载插件，预设将自动同步持久化到对应文件，并在下方 **`view_builtin_presets`** 与 **`view_custom_presets`** 列表中实时查看！
+
+#### 4. 在聊天中使用指令管理
 ```
-/nai presets                              查看所有预设（也可用 /nai 预设）
-/nai presets <预设名>                      查看单个预设详情（也可用 /nai 预设 <预设名>）
-/nai save 我的预设 best quality, detailed  保存自定义预设（也可用 /nai 保存）
-/nai update 我的预设 best quality, masterpiece  修改自定义预设（也可用 /nai 修改）
-/nai del 我的预设                          删除自定义预设（也可用 /nai 删除）
+/nai presets                              查看所有预设（分组展示【内置预设库】与【自定义预设库】）
+/nai presets <预设名>                      查看单个预设的三要素完整详情
+/nai save 我的预设 best quality, detailed  保存自定义预设（默认 custom）
+/nai save 赛博特化 artist:cyber --prompt neon, night --negative blurry --type custom   保存包含正向词与负面词的预设
+/nai update 我的预设 best quality, masterpiece  修改自定义预设（支持 --prompt / --negative 参数）
+/nai del 我的预设                          删除自定义预设（出厂内置预设受保护不可删）
 ```
 
-> **小提示**：`save` 命令以「第一个空格」分割名称和质量前缀，所以预设名称不能含空格。
-> 例如 `/nai save 我的预设 best quality, absurdres` → 名称=`我的预设`，质量前缀=`best quality, absurdres`。
-> 如果想修改已保存的预设，用同样的名称重新保存即可覆盖。
+> **小提示**：
+> - 预设名称不能包含空格。
+> - 保存时若指定 `--type builtin`，即可扩充至内置预设库。
+> - 系统出厂预设受强保护，指令尝试覆盖或删除时会被直接拒绝并指引更换名称。
 
 **查询余额** — 查看你的 Nai2API 剩余点数：
 
