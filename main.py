@@ -407,7 +407,12 @@ class Nai2ApiPlugin(Star):
             timeout=timeout,
         )
 
-        self.presets = PresetManager(self.data_dir)
+        # 预设。两个来源：WebUI 配置的「预设管理」列表（权威）+ data/presets.json
+        # （历史数据 / 指令写入）。以 WebUI 为准，旧文件数据会自动迁移过去，
+        # 这样用户无论从哪边改，看到的结果都一致。
+        self.presets = PresetManager(
+            self.data_dir, webui_presets=config.get("custom_presets", [])
+        )
 
         # 提示词直译（中文/英文 → 英文标签）
         self.translator = TranslateManager(config, context)
@@ -750,6 +755,53 @@ class Nai2ApiPlugin(Star):
         )
         event.stop_event()
         return event.plain_result("")
+
+    # -- 预设回写 --------------------------------------------------------
+
+    async def _persist_presets_to_config(self) -> None:
+        """把预设写回 AstrBot 配置（`custom_presets`）。
+
+        为什么需要这一步：预设有两个存储位置 —— WebUI 配置
+        （`_conf_schema.json` 的 `custom_presets`，权威来源）和
+        `data/presets.json`（指令写入的落盘）。用户用 `/nai save` 加了个预设，
+        如果只写了 json 文件没写配置，**下次插件重载时 WebUI 里的旧配置
+        会把这份改动覆盖掉** —— 表现就是「我用指令加的预设过一阵自己没了」，
+        很难排查。
+
+        所以每次指令改完预设，都要把最新状态同步回配置。
+
+        容错优先：拿不到 context、没有该配置项、写盘失败，都只记日志，
+        绝不向上抛。预设已经存进 json 了，功能是好的，回写失败最多是
+        「重载后可能回退」，不该让用户的 `/nai save` 报错。
+        """
+        try:
+            ctx = getattr(self, "context", None)
+            if ctx is None or not callable(getattr(ctx, "get_config", None)):
+                return
+
+            cfg = ctx.get_config()
+            if cfg is None:
+                return
+
+            # 用户可能把整个配置项删了 / 用了旧版 schema，这时静默跳过
+            if "custom_presets" not in cfg:
+                logger.debug("[PresetManager] 配置里没有 custom_presets 项，跳过回写")
+                return
+
+            payload = self.presets.export_for_webui()
+            save_async = getattr(cfg, "save_config_async", None)
+            if callable(save_async):
+                ok = await save_async({"custom_presets": payload})
+                if not ok:
+                    logger.warning("[PresetManager] 预设回写配置返回失败")
+                return
+
+            # 老版本 AstrBot 只有同步方法
+            save_sync = getattr(cfg, "save_config", None)
+            if callable(save_sync):
+                save_sync({"custom_presets": payload})
+        except Exception as e:
+            logger.error("[PresetManager] 预设回写配置失败: %s", e)
 
     async def _send_image_with_info(
         self, event: AstrMessageEvent, image_path: Path,
@@ -1287,6 +1339,18 @@ class Nai2ApiPlugin(Star):
         is_overwrite = self.presets.get(name) is not None
         self.presets.save(name, artist)
         action = "已更新" if is_overwrite else "已保存"
+        return self._save_preset_result(event, name, artist, action)
+
+    async def _save_preset_result(
+        self, event: AstrMessageEvent, name: str, artist: str, action: str,
+    ):
+        """保存预设后的回写 + 回复。
+
+        `_handle_save_preset` 是同步函数（AstrBot 的 `filter.command` handler
+        允许返回协程，`call_handler` 会 await 它），没法在里面 await 回写，
+        所以把「回写 + 回复」交给这个异步包装。
+        """
+        await self._persist_presets_to_config()
         return event.plain_result(f"{action}预设 '{name}': {artist}")
 
     def _handle_del_preset(self, event: AstrMessageEvent, args: str):
@@ -1299,9 +1363,17 @@ class Nai2ApiPlugin(Star):
             return event.plain_result(f"'{name}' 是内置预设，无法删除")
 
         if self.presets.delete(name):
-            return event.plain_result(f"已删除预设 '{name}'")
+            # 注意：这里是同步 handler，没法 await 回写；而回写漏了会导致
+            # 「重载后删掉的预设又回来了」。所以把回写+回复交给异步包装
+            # （AstrBot 的 call_handler 会 await handler 返回的协程）。
+            return self._del_preset_result(event, name)
         else:
             return event.plain_result(f"预设 '{name}' 不存在")
+
+    async def _del_preset_result(self, event: AstrMessageEvent, name: str):
+        """删除预设后的回写 + 回复（理由同 _save_preset_result）。"""
+        await self._persist_presets_to_config()
+        return event.plain_result(f"已删除预设 '{name}'")
 
     def _handle_update_preset(self, event: AstrMessageEvent, args: str):
         """修改自定义预设"""
@@ -1327,9 +1399,14 @@ class Nai2ApiPlugin(Star):
             return event.plain_result(f"'{name}' 是内置预设，无法修改")
 
         if self.presets.update(name, artist=artist):
-            return event.plain_result(f"已修改预设 '{name}': {artist}")
+            return self._update_preset_result(event, name, artist)
         else:
             return event.plain_result(f"预设 '{name}' 不存在，使用 /nai save 保存新预设")
+
+    async def _update_preset_result(self, event: AstrMessageEvent, name: str, artist: str):
+        """修改预设后的回写 + 回复（理由同 _save_preset_result）。"""
+        await self._persist_presets_to_config()
+        return event.plain_result(f"已修改预设 '{name}': {artist}")
 
     @filter.llm_tool(name="nai_generate")
     async def nai_generate_tool(
@@ -1568,6 +1645,7 @@ class Nai2ApiPlugin(Star):
 
         is_overwrite = self.presets.get(name) is not None
         self.presets.save(name, artist)
+        await self._persist_presets_to_config()
         action = "已更新" if is_overwrite else "已保存"
         result_text = f"{action}预设 '{name}' 成功"
         await event.send(event.plain_result(result_text))
@@ -1606,6 +1684,7 @@ class Nai2ApiPlugin(Star):
             )
 
         if self.presets.update(name, artist=artist):
+            await self._persist_presets_to_config()
             result_text = f"已修改预设 '{name}' 成功"
             await event.send(event.plain_result(result_text))
             return mcp.types.CallToolResult(
@@ -1642,6 +1721,7 @@ class Nai2ApiPlugin(Star):
             )
 
         if self.presets.delete(name):
+            await self._persist_presets_to_config()
             result_text = f"已删除预设 '{name}'"
             await event.send(event.plain_result(result_text))
             return mcp.types.CallToolResult(

@@ -7,6 +7,7 @@
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 from astrbot.api import logger
 
@@ -151,34 +152,195 @@ def ensure_composition(prompt: str, artist: str = "") -> tuple[str, bool]:
     return f"{prompt.strip()}{sep}{DEFAULT_COMPOSITION}", True
 
 
+# ---------------------------------------------------------------------------
+# WebUI template_list 里的条目 → 内部预设格式
+# ---------------------------------------------------------------------------
+
+def parse_webui_presets(raw: Any) -> dict[str, dict[str, str]]:
+    """把 WebUI「预设管理」里的条目解析成内部格式。
+
+    WebUI 的 template_list 每项长这样（`__template_key` 是编辑器加的标记）：
+        {"__template_key": "preset", "name": "我的预设",
+         "artist": "best quality, ...", "desc": "备注"}
+
+    容错优先，和群号黑名单一个思路：解析不出来的项**跳过并记日志**，
+    绝不抛异常。配置写错最多是这个预设不生效，但如果插件加载失败，
+    用户连生图都用不了了。
+
+    Args:
+        raw: 配置值，正常情况下是 list[dict]，也容忍 None / 其它类型。
+
+    Returns:
+        {预设名: {"artist": ..., "desc": ...}}
+    """
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        # 兼容用户手写成 {"名字": "画师串"} 的情况
+        raw = [{"name": k, "artist": v} for k, v in raw.items()]
+    if not isinstance(raw, (list, tuple)):
+        return {}
+
+    result: dict[str, dict[str, str]] = {}
+    for idx, item in enumerate(raw):
+        if not isinstance(item, dict):
+            logger.debug("[PresetManager] 忽略第 %d 项：不是对象 (%r)", idx, item)
+            continue
+
+        name = str(item.get("name", "") or "").strip()
+        artist = str(item.get("artist", "") or "").strip()
+        desc = str(item.get("desc", "") or "").strip()
+
+        if not name:
+            logger.warning("[PresetManager] 忽略第 %d 项：预设名为空", idx)
+            continue
+        if " " in name:
+            # 预设名带空格会让 `/nai -p 名字` 和 `--preset` 解析不出来
+            logger.warning(
+                "[PresetManager] 忽略预设 %r：名字不能含空格", name,
+            )
+            continue
+        if not artist:
+            logger.warning("[PresetManager] 忽略预设 %r：画师串为空", name)
+            continue
+        if name in BUILTIN_PRESETS:
+            logger.warning(
+                "[PresetManager] 忽略预设 %r：与内置预设重名（会覆盖官方效果，容易混淆）", name,
+            )
+            continue
+
+        result[name] = {"artist": artist, "desc": desc or "自定义预设"}
+
+    return result
+
+
 class PresetManager:
-    """预设管理器"""
-    def __init__(self, data_dir: Path):
+    """预设管理器
+
+    预设有两个来源，必须保持一致：
+
+    1. **WebUI 配置**（`_conf_schema.json` 的 `custom_presets`，template_list）
+       —— 推荐方式，增删改点几下就行，改完立即生效，不用重启
+    2. **data/presets.json** —— 历史数据 / `/nai save` 指令写入的地方
+
+    两者关系：**以 WebUI 为准**。
+
+    - 启动时如果 presets.json 里有、WebUI 里没有的预设 → 视为「待迁移」，
+      自动补进 WebUI 配置（只做一次，之后 presets.json 只作为指令写入的落盘）
+    - WebUI 里删掉某个预设 → 下次同步时把 presets.json 里的同名项也删掉
+
+    这样用户无论从哪边操作，看到的结果都一致，不会出现
+    「文件里改了但界面看不到」这种迷惑情况。
+    """
+
+    def __init__(self, data_dir: Path, webui_presets: Any = None):
         self._preset_file = data_dir / "presets.json"
         self._custom_presets: dict[str, dict[str, str]] = {}
-        self._load()
+        # WebUI 配置里的预设（权威来源）
+        self._webui_presets: dict[str, dict[str, str]] = parse_webui_presets(webui_presets)
+        self._load_file()
+        self._merge()
 
-    def _load(self) -> None:
+    # -- 文件读写 --------------------------------------------------------
+
+    def _load_file(self) -> None:
         if self._preset_file.exists():
             try:
                 with open(self._preset_file, "r", encoding="utf-8") as f:
-                    self._custom_presets = json.load(f)
-                logger.info("[PresetManager] 已加载 %d 个自定义预设", len(self._custom_presets))
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    self._custom_presets = data
+                logger.info(
+                    "[PresetManager] 已加载 %d 个自定义预设（文件）",
+                    len(self._custom_presets),
+                )
             except Exception as e:
                 logger.warning("[PresetManager] 加载预设文件失败: %s", e)
                 self._custom_presets = {}
 
-    def _save(self) -> None:
-        self._preset_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._preset_file, "w", encoding="utf-8") as f:
-            json.dump(self._custom_presets, f, ensure_ascii=False, indent=2)
+    def _save_file(self) -> None:
+        try:
+            self._preset_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._preset_file, "w", encoding="utf-8") as f:
+                json.dump(self._custom_presets, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error("[PresetManager] 写入预设文件失败: %s", e)
+
+    def _merge(self) -> None:
+        """把两个来源合并成一份，以 WebUI 为准。
+
+        规则：
+        - WebUI 有的，覆盖文件里的同名项
+        - 文件里有、WebUI 里没有的 → 迁移进 WebUI（并提示用户）
+        - 两边都没有的 → 不存在
+        """
+        changed = False
+
+        # 1) 文件里的旧预设，如果 WebUI 里没有，迁移过去
+        for name, info in self._custom_presets.items():
+            if name in self._webui_presets:
+                continue
+            if name in BUILTIN_PRESETS:
+                continue
+            artist = info.get("artist", "")
+            if not artist:
+                continue
+            self._webui_presets[name] = {
+                "artist": artist,
+                "desc": info.get("desc", "") or "自定义预设",
+            }
+            changed = True
+            logger.info(
+                "[PresetManager] 已迁移预设 '%s'（文件 → WebUI 配置）", name,
+            )
+
+        if changed:
+            logger.info(
+                "[PresetManager] 迁移完成。建议到 WebUI 检查「预设管理」，"
+                "之后的增删改都在那里做即可。"
+            )
+
+        # 2) 以 WebUI 为准，重建生效集合
+        self._custom_presets = dict(self._webui_presets)
+        if changed:
+            self._save_file()
+
+    def reload_from_webui(self, webui_presets: Any, *, exact: bool = False) -> None:
+        """WebUI 配置变更后重新同步（例如插件重载时）。
+
+        Args:
+            webui_presets: 新的 WebUI 配置值
+            exact: 是否「精确模式」。
+
+                这个参数存在是因为**启动时和重载时的正确行为不一样**：
+
+                - 启动（exact=False）：文件里有、WebUI 里没有的项，可能是
+                  「用户还没迁移的旧数据」，也可能是「用户在 WebUI 里删掉的」。
+                  两者凭配置无法区分。宁可多留一次（用户能再删），
+                  也不要静默丢数据 —— 所以自动迁移进来。
+                - 重载（exact=True）：此时配置是权威的，以它为准，
+                  不在配置里的就删掉。用指令改过的东西已经回写进配置了，
+                  不会再出现在「文件有但配置没有」的状态里。
+
+        """
+        self._webui_presets = parse_webui_presets(webui_presets)
+        if exact:
+            for name in list(self._custom_presets):
+                if name not in self._webui_presets:
+                    self._custom_presets.pop(name, None)
+                    logger.info(
+                        "[PresetManager] 已移除预设 '%s'（WebUI 配置里已删除）", name,
+                    )
+            self._merge()
+        else:
+            self._merge()
+
+    # -- 查询 ------------------------------------------------------------
 
     def get(self, name: str) -> str | None:
         """获取预设的 artist 值，返回 None 表示预设不存在"""
-        # 优先查自定义预设
         if name in self._custom_presets:
-            return self._custom_presets[name]["artist"]
-        # 再查内置预设
+            return self._custom_presets[name].get("artist")
         if name in BUILTIN_PRESETS:
             return BUILTIN_PRESETS[name]["artist"]
         return None
@@ -189,21 +351,34 @@ class PresetManager:
         result.update(self._custom_presets)
         return result
 
+    def list_custom(self) -> dict[str, dict[str, str]]:
+        """只列自定义预设"""
+        return dict(self._custom_presets)
+
+    def is_builtin(self, name: str) -> bool:
+        return name in BUILTIN_PRESETS
+
+    # -- 修改 ------------------------------------------------------------
+
     def save(self, name: str, artist: str, desc: str = "") -> None:
-        """保存自定义预设"""
-        self._custom_presets[name] = {
+        """保存自定义预设（WebUI 和文件同时更新）"""
+        entry = {
             "artist": artist.strip(),
-            "desc": desc.strip() or f"自定义预设",
+            "desc": desc.strip() or "自定义预设",
         }
-        self._save()
+        self._custom_presets[name] = entry
+        # 同步进 WebUI 侧，这样用户在配置页也能看到用指令加的预设
+        self._webui_presets[name] = dict(entry)
+        self._save_file()
         logger.info("[PresetManager] 已保存预设 '%s'", name)
 
     def delete(self, name: str) -> bool:
         """删除自定义预设，返回是否成功"""
         if name not in self._custom_presets:
             return False
-        del self._custom_presets[name]
-        self._save()
+        self._custom_presets.pop(name, None)
+        self._webui_presets.pop(name, None)
+        self._save_file()
         logger.info("[PresetManager] 已删除预设 '%s'", name)
         return True
 
@@ -215,9 +390,25 @@ class PresetManager:
             self._custom_presets[name]["artist"] = artist.strip()
         if desc is not None:
             self._custom_presets[name]["desc"] = desc.strip()
-        self._save()
+        self._webui_presets[name] = dict(self._custom_presets[name])
+        self._save_file()
         logger.info("[PresetManager] 已修改预设 '%s'", name)
         return True
 
-    def is_builtin(self, name: str) -> bool:
-        return name in BUILTIN_PRESETS
+    # -- 供 WebUI 回写 ---------------------------------------------------
+
+    def export_for_webui(self) -> list[dict[str, str]]:
+        """导成 WebUI template_list 需要的格式。
+
+        指令（`/nai save` 等）改了预设之后，需要把它写回 AstrBot 配置，
+        否则用户重载插件时 WebUI 里的旧值会把指令的改动覆盖掉。
+        """
+        out: list[dict[str, str]] = []
+        for name, info in self._custom_presets.items():
+            out.append({
+                "__template_key": "preset",
+                "name": name,
+                "artist": info.get("artist", ""),
+                "desc": info.get("desc", ""),
+            })
+        return out

@@ -139,6 +139,38 @@
     "type": "bool",
     "default": true
   },
+  "custom_presets": {
+    "description": "预设管理",
+    "hint": "在这里增删改预设，不用改文件也不用发指令，改完立即生效。点「添加条目」新增一个预设，填预设名和质量前缀/画师串即可。这里保存的预设会覆盖同名内置预设，也能被 /nai save、/nai del、/nai update 指令读写（两种方式操作同一份数据）。",
+    "type": "template_list",
+    "default": [],
+    "templates": {
+      "preset": {
+        "name": "预设",
+        "hint": "一个自定义预设",
+        "items": {
+          "name": {
+            "description": "预设名",
+            "hint": "调用时用的名字，不能含空格，例如 我的唯美风。不要和内置预设重名（2.5D唯美风 / 韩漫小清新风 / 本子动漫风 / GalGame风 / 动漫风）",
+            "type": "string",
+            "default": ""
+          },
+          "artist": {
+            "description": "质量前缀 / 画师串",
+            "hint": "这段会拼在提示词最前面。可以写画师串、质量词、构图词，例如 best quality, absurdres, detailed, full body。里面的负权重（-2::green::）会自动移到负面提示词",
+            "type": "text",
+            "default": ""
+          },
+          "desc": {
+            "description": "备注",
+            "hint": "只用于在列表里显示，可留空",
+            "type": "string",
+            "default": ""
+          }
+        }
+      }
+    }
+  },
   "group_blacklist": {
     "description": "群聊黑名单",
     "hint": "填群号，多个用逗号或换行分隔。黑名单里的群**完全不会触发生图**：无论谁发什么指令、有没有 @ 机器人都一样，而且机器人不会在该群发任何回复（连报错都不发，彻底静默）。留空则所有群正常可用。只对群聊生效，私聊不受影响。示例：123456789, 987654321",
