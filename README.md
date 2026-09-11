@@ -533,6 +533,26 @@ denoising_strength={{strength}}
 前两层保证「**生不出图**」，第 3 层额外保证「**LLM 压根不知道有人要生图**」。
 
 <details>
+<summary>换了唤醒词（<code>#</code>/<code>.</code> 等）或改了命令名，会不会绕过黑名单？</summary>
+
+**不会，全都被拦住。**
+
+原因是拦截点比"唤醒词解析"更靠前。AstrBot 的 `filter.command` 在**进入 handler 之前**，
+就已经把唤醒前缀（`/`、`#`、`.`、`!`……）和命令名一起剥掉了，handler 收到的
+`args` 是「命令之后的那段文本」。
+
+所以黑名单判断只要放在 handler 入口，就**天然覆盖所有唤醒词和所有命令名** ——
+插件根本不需要去识别它们是哪个，因为到不了这一步。
+
+同样地，`command_names` 配的别名（比如 `/niu`、`/绘`）也全部走
+`_handle_generate_command` 这一个主流程，而黑名单判断是它的第一行，
+所以别名一个都跑不掉。
+
+实测覆盖：`/nai`、`/niu`、`/绘`、`/draw` 四个命令名 × 各种入参形态，黑名单群全部静默拦截。
+
+</details>
+
+<details>
 <summary>为什么第 3 层要用 <code>on_llm_request</code>，而不是把工具的 <code>active</code> 设成 <code>False</code>？</summary>
 
 这是个坑，记一下。
