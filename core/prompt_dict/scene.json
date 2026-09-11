@@ -1,6 +1,5 @@
 {
   "_comment": "场景/背景/氛围词库。这类词的写法和模型翻译的偏差最大（模型爱把「下着雨的街道」翻成英文句子），查表收益最高。",
-
   "environment": {
     "户外": "outdoors",
     "室内": "indoors",
@@ -131,7 +130,6 @@
     "雨伞": "umbrella",
     "伞": "umbrella"
   },
-
   "style": {
     "动漫风格": "anime style",
     "日系": "anime style",
@@ -181,7 +179,6 @@
     "广角镜头": "wide angle",
     "浅景深": "shallow depth of field"
   },
-
   "action": {
     "战斗": "fighting",
     "打斗": "fighting",
@@ -240,7 +237,6 @@
     "拥抱接吻": "kiss",
     "接吻": "kiss"
   },
-
   "composition": {
     "多人": "multiple girls",
     "单人": "solo",
@@ -252,7 +248,7 @@
     "全身像": "full body",
     "远景全身": "full body, wide shot",
     "对角线构图": "diagonal composition",
-    "对称构图": "symmetry",
+    "对称构图": "symmetric composition",
     "居中构图": "centered",
     "三分法": "rule of thirds",
     "俯拍": "from above",
@@ -260,6 +256,36 @@
     "过肩镜头": "over-the-shoulder",
     "背影视角": "from behind",
     "第一人称视角": "pov",
-    "视角从下往上": "from below"
+    "视角从下往上": "from below",
+    "上半身": "upper body",
+    "下半身": "lower body",
+    "全身构图": "full body",
+    "半身构图": "upper body",
+    "近景": "close-up",
+    "脸部特写": "face focus",
+    "头部特写": "portrait",
+    "肖像": "portrait",
+    "大头": "portrait",
+    "横构图": "landscape",
+    "竖构图": "portrait",
+    "正方形": "square",
+    "全身照": "full body",
+    "全身立绘": "full body",
+    "立绘": "full body",
+    "站姿全身": "standing, full body",
+    "广角镜头": "wide shot",
+    "远景构图": "wide shot",
+    "视角": "from viewer",
+    "正面": "from front",
+    "斜侧面": "three quarter view",
+    "四分之三侧面": "three quarter view",
+    "鸟瞰": "from above, bird's eye view",
+    "顶视": "from above",
+    "低角度": "from below",
+    "荷兰角": "dutch angle",
+    "倾斜构图": "dutch angle",
+    "构图": "composition",
+    "背景虚化": "depth of field",
+    "景深": "depth of field"
   }
 }

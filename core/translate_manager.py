@@ -206,6 +206,48 @@ def _collapse_synonyms(tags: str) -> str:
     return ", ".join(p for i, p in enumerate(parts) if i not in drop)
 
 
+# 质量标签：命中这些的标签会被自动加权重。
+# 为什么只给质量词加，不给普通标签加：
+#   给「泳装」这类内容标签加权重会让该概念过拟合，挤掉画面其他部分
+#   （这正是之前画不对的原因之一）；而质量词加权重是纯收益 ——
+#   它提升整体画面精度，不与具体内容争抢表现力。
+# 注意：如果标签**已经带权重语法**（1.2::xxx::），一律跳过，绝不覆盖用户意图。
+_QUALITY_TAGS: frozenset[str] = frozenset({
+    "best quality", "masterpiece", "absurdres", "highres",
+    "very aesthetic", "aesthetic", "detailed", "ultra detailed",
+    "highly detailed", "extremely detailed", "no text", "textless",
+    "official art", "beautiful", "amazing quality", "high quality",
+})
+
+# 自动加权的系数。1.2 是社区常用值：明显强于裸标签，又不至于压过画师串。
+_QUALITY_WEIGHT = "1.2"
+
+
+def _wrap_quality_tags(tags: str, weight: str = _QUALITY_WEIGHT) -> str:
+    """给未被加权过的质量标签套上权重语法。
+
+    只处理「裸质量词」：已经有 `::` 权重、或已被 `{{}}`/`[]` 包裹的跳过，
+    避免出现 `1.2::1.3::masterpiece::::` 这种嵌套垃圾。
+    """
+    if not tags:
+        return tags
+    out: list[str] = []
+    for raw in tags.split(","):
+        tag = raw.strip()
+        if not tag:
+            continue
+        low = tag.lower()
+        # 已带权重语法 / 已用花括号或方括号包裹 → 尊重原样
+        if "::" in tag or tag.startswith(("{", "[")):
+            out.append(tag)
+            continue
+        if low in _QUALITY_TAGS:
+            out.append(f"{weight}::{tag}::")
+        else:
+            out.append(tag)
+    return ", ".join(out)
+
+
 class TranslateManager:
     """提示词翻译管理器"""
 
@@ -247,6 +289,16 @@ class TranslateManager:
         self.verify_enabled = bool(config.get("translate_verify_enabled", True))
         self.verify_retry = max(0, int(config.get("translate_verify_retry", 1)))
         self.verify_on_fail = str(config.get("translate_verify_on_fail", "warn")).strip().lower()
+
+        # 质量词自动加权（best quality / masterpiece 等 → 1.2::xxx::）
+        self.quality_weight_enabled = bool(config.get("translate_quality_weight", True))
+        _qw = str(config.get("translate_quality_weight_value", _QUALITY_WEIGHT)).strip() or _QUALITY_WEIGHT
+        try:
+            float(_qw)
+            self.quality_weight_value = _qw
+        except ValueError:
+            logger.warning("[Translate] 质量权重值 %r 不是数字，回退默认 %s", _qw, _QUALITY_WEIGHT)
+            self.quality_weight_value = _QUALITY_WEIGHT
 
         # 最近一次翻译的统计，供日志/调试查看
         self.last_stats: dict[str, Any] = {}
@@ -348,6 +400,11 @@ class TranslateManager:
         # 去重之后再折叠近义标签（swimsuit+bikini → swimsuit），
         # 否则模型补出的近义词会和词库结果一起被加权
         final = _collapse_synonyms(final)
+
+        # 质量词自动加权（放在最后一步：去重和折叠都做完后再套权重，
+        # 避免出现 `1.2::best quality::` 与 `best quality` 同时存在）
+        if self.quality_weight_enabled:
+            final = _wrap_quality_tags(final, self.quality_weight_value)
 
         return _clean_result(final)
 

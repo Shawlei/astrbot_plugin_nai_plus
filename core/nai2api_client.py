@@ -287,9 +287,23 @@ class Nai2ApiClient:
         final_artist = artist if artist is not None else self.default_artist
         final_noise_schedule = noise_schedule or self.default_noise_schedule
 
+        # 画师串必须拼进 tag —— 否则它等于没生效。
+        #
+        # 这里踩过一个坑：原先把画师串单独放在 `artist` 请求参数里发出去，
+        # 结果预设里写的 `artist collaboration` / `year 2024` / `perspective`
+        # 这类**正向提示词内容**全部丢失，表现为「画风不生效、什么图都是
+        # 上半身」—— 因为构图类标签没进 prompt，NAI 会退回训练数据的统计
+        # 偏好（默认出 portrait / upper body）。
+        #
+        # 顺序：画师串在前（含质量词与画风，属于全局风格），
+        #       用户提示词在后（描述具体画面内容）。这也是 NAI 的常见写法。
+        final_prompt = prompt.strip()
+        if final_artist and final_artist.strip():
+            final_prompt = f"{final_artist.strip()}, {final_prompt}"
+
         params = {
             "token": self.token,
-            "tag": prompt.strip(),
+            "tag": final_prompt,
             "model": final_model,
             "size": final_size,
             "steps": str(final_steps),
@@ -301,8 +315,6 @@ class Nai2ApiClient:
         }
         if final_negative:
             params["negative"] = final_negative
-        if final_artist:
-            params["artist"] = final_artist
         if seed is not None:
             params["seed"] = str(seed)
 
@@ -312,7 +324,9 @@ class Nai2ApiClient:
             "[Nai2API] 开始生图: model=%s, size=%s, steps=%s, scale=%s, sampler=%s",
             final_model, final_size, final_steps, final_scale, final_sampler,
         )
-        logger.info("[Nai2API] 提示词: %s", prompt.strip())
+        if final_artist and final_artist.strip():
+            logger.info("[Nai2API] 画师串: %s", final_artist.strip())
+        logger.info("[Nai2API] 提示词: %s", final_prompt)
         logger.debug("[Nai2API] 请求 URL: %s", url.replace(self.token, "***") if self.token else url)
 
         session = await self._get_session()

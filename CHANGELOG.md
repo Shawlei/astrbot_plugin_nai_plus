@@ -3,6 +3,60 @@
 > 说明：本仓库自 v1.0.0 起独立计数（原项目基于 helloWKQ/AstrBot_Nai2API 二开，
 > 早期内部迭代过 v1.2.0 / v1.3.x，为对接 AstrBot 插件市场，版本号从 1.0.0 重新开始）。
 
+## v1.2.2
+
+修两个让「画风完全不生效」的 bug，并加上质量词自动加权。
+
+### 修复：画师串压根没进提示词（严重）
+
+**这是画风不生效、什么图都是上半身的直接原因。**
+
+`final_artist` 被单独作为一个 `artist` 请求参数发出去，从来没拼进 `tag`
+（正向提示词主体）：
+
+    params = {
+        "tag": prompt.strip(),          # ← 只有翻译结果
+        ...
+    }
+    if final_artist:
+        params["artist"] = final_artist  # ← 画师串孤零零待在这
+
+而预设里写的其实是**正向提示词内容**：
+
+    "动漫风": "artist collaboration, 0.70::artist:necomi ::, ..., year 2024, perspective"
+    DEFAULT_ARTIST = "... best quality, absurdres, very aesthetic, masterpiece, ..."
+
+`artist collaboration`、`year 2024`、`perspective`、`masterpiece` 这些全是
+prompt 标签，被塞进独立字段后**全部失效**。后果：
+- 画风标签没生效 → 画出来的不是预设风格
+- 构图标签（`perspective` 等）没生效 → 缺少构图约束，NAI 退回训练数据的
+  统计偏好，**默认出 portrait / upper body，所以张张都是上半身**
+
+修复：把画师串拼进 `tag`，画师串在前（全局风格）、用户提示词在后：
+
+    final_prompt = f"{final_artist.strip()}, {prompt.strip()}"
+
+同时日志新增一行 `[Nai2API] 画师串: ...`，以后这类问题一眼可见。
+
+### 新增：质量词自动加权
+
+按需给质量标签套权重，强化整体画面精度：
+
+- 命中 `best quality` / `masterpiece` / `absurdres` / `very aesthetic` /
+  `detailed` 等质量词 → 自动包成 `1.2::best quality::`
+- **只处理裸质量词**：已带 `1.3::xxx::`、`{{xxx}}`、`[xxx]` 的**原样跳过**，
+  不覆盖用户意图，也不会产生 `1.2::1.3::xxx::::` 这种嵌套垃圾
+- **内容标签不加权重**：给 `swimsuit` 这类加权重会让该概念过拟合、挤掉画面
+  其他部分（正是之前画不对的原因之一）；质量词加权重是纯收益
+- 两个配置项：`translate_quality_weight`（开关，默认开）、
+  `translate_quality_weight_value`（倍数，默认 `1.2`）
+
+### 其他
+
+- 场景词库补 30 条构图/视角词（`上半身`/`全身构图`/`立绘`/`荷兰角`/`鸟瞰`
+  等）—— 构图类是「全是上半身」的直接解药
+- 词库 1440 → 1466 条；测试 110 → 124 项
+
 ## v1.2.1
 
 修一批「翻译看着没问题、画出来却不对」的问题。根因不是翻译错了，是**模型多说了话**。

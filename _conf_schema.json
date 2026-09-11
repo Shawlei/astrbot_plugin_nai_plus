@@ -304,6 +304,18 @@
     ],
     "default": "warn"
   },
+  "translate_quality_weight": {
+    "type": "bool",
+    "description": "质量词自动加权",
+    "hint": "给 best quality / masterpiece / absurdres 等质量标签自动套 1.2:: 权重。只处理裸质量词，已带权重的原样保留。内容标签（如 swimsuit）不加权重，避免过拟合。",
+    "default": true
+  },
+  "translate_quality_weight_value": {
+    "type": "string",
+    "description": "质量词权重倍数",
+    "hint": "质量词自动加权时使用的数值，1.2 为社区常用值。填数字即可，不要写 :: 符号。",
+    "default": "1.2"
+  },
   "translate_user_dict_path": {
     "description": "自定义词库文件路径",
     "hint": "留空则只用插件内置词库。填一个 .json 或 .txt 路径可加载你自己的词库（会与内置词库合并，你的优先）。相对路径按 AstrBot 数据目录算。格式见 README「词库」章节",
