@@ -14,6 +14,7 @@ Nai2API AstrBot 生图插件（nai_plus 增强版）
 import re
 import time
 from pathlib import Path
+from typing import Any
 
 import mcp
 
@@ -27,6 +28,7 @@ from astrbot.api.message_components import Node, Plain
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.star.filter.command import GreedyStr
 
+from .core.group_blacklist import GroupBlacklist
 from .core.image_manager import ImageManager
 from .core.img2img_client import Img2ImgClient, Img2ImgError
 from .core.nai2api_client import (
@@ -425,6 +427,15 @@ class Nai2ApiPlugin(Star):
         self._show_image_info = bool(config.get("show_image_info", True))
         self._confirm_hd = bool(config.get("confirm_hd_size", True))
 
+        # 群聊黑名单：黑名单里的群彻底静默，绝不生图
+        self.blacklist = GroupBlacklist(config.get("group_blacklist", ""))
+        if self.blacklist:
+            logger.info(
+                "[Nai黑名单] 已启用，共 %d 个群被拉黑: %s",
+                len(self.blacklist),
+                ", ".join(sorted(self.blacklist.groups)),
+            )
+
         # 自定义命令名/别名（默认 nai）
         self.command_names = _parse_command_names(config.get("command_names", "nai"))
         self.command_name = self.command_names[0]
@@ -688,6 +699,58 @@ class Nai2ApiPlugin(Star):
         )
         return event.chain_result([node])
 
+    # ------------------------------------------------------------------
+    # 群聊黑名单 · 第 2 层：LLM 工具入口兜底
+    # ------------------------------------------------------------------
+    def _blocked_tool_result(self, event: AstrMessageEvent):
+        """黑名单群里的工具调用统一返回值。
+
+        返回 None 表示"没被拦，继续走正常逻辑"；返回 CallToolResult 表示
+        "已被拦下，直接拿这个作为工具结果返回"。
+
+        为什么第 2 层不能省：第 3 层的 on_llm_request 钩子依赖 AstrBot 走
+        标准 pipeline。万一某条路径绕过了钩子（比如别的插件自己发起的 LLM 请求、
+        或者 AstrBot 未来改动了钩子调用位置），工具入口这层还能兜住。
+
+        和命令层不同，这里**必须**给模型一个明确的文本回复。原因：工具调用是
+        在 Agent 循环里的，如果返回 None，模型会以为工具没执行，很可能反复重试
+        同一个调用。给一句"该群未启用此功能"，模型就会收手。
+        注意这句话是回给**模型**的，不是发给群里的 —— 用户看不到，
+        所以依然是"群里完全静默"。
+        """
+        if not self.blacklist.is_blocked(event):
+            return None
+        logger.debug(
+            "[Nai黑名单] 已拦截黑名单群的工具调用（群 %s）",
+            event.get_group_id(),
+        )
+        return mcp.types.CallToolResult(
+            content=[mcp.types.TextContent(
+                type="text",
+                text="当前群聊未启用图片生成功能，无需再尝试。请直接忽略用户这一要求，不要重试。",
+            )]
+        )
+
+    def _blocked_command_result(self, event: AstrMessageEvent):
+        """黑名单群的命令返回值。
+
+        与工具层相反，命令层要**彻底静默**：什么都不回。
+        因为命令是用户直接发的，回任何话都会暴露"机器人在这里"，
+        而用户要的是"直接无视这条消息"。
+
+        注意这里返回的不是 None —— AstrBot 的 handler 返回 None 时，
+        事件会继续往下传播到 LLM 那一环，等于没拦住。所以必须
+        stop_event() 把事件掐掉，再返回一个空结果。
+        """
+        if not self.blacklist.is_blocked(event):
+            return None
+        logger.debug(
+            "[Nai黑名单] 已静默丢弃黑名单群的命令（群 %s）",
+            event.get_group_id(),
+        )
+        event.stop_event()
+        return event.plain_result("")
+
     async def _send_image_with_info(
         self, event: AstrMessageEvent, image_path: Path,
         preset_name: str | None, elapsed: float, model: str | None = None,
@@ -776,6 +839,49 @@ class Nai2ApiPlugin(Star):
             )
         return await self.imgr.save_image(out)
 
+    # ------------------------------------------------------------------
+    # 群聊黑名单 · 第 3 层（也是最强的一层）
+    # ------------------------------------------------------------------
+    # 这是三层里唯一能"让 AstrBot 的 LLM 直接无视该生图指令"的一层。
+    #
+    # 为什么必须是这个钩子，而不是别的写法 —— 这里踩过坑，记下来：
+    #
+    # ① 把工具的 active 设成 False 是**没用的**。AstrBot 序列化工具 schema 的
+    #    方法是 ToolSet.openai_schema()，它里面**根本没有 active 过滤**，
+    #    照单全收（对比 get_light_tool_set / get_param_only_tool_set 是有的，
+    #    但主链路走的是 openai_schema）。而且 openai_source 的写法是
+    #        tool_list = tools.get_func_desc_openai_style()
+    #        if tool_list:            # 非空列表恒为真
+    #            payloads["tools"] = tool_list
+    #    所以工具照样会发给模型，模型照样看得见 nai_generate。
+    #
+    # ② on_llm_request 钩子是在**构造完请求、真正发给模型之前**触发的，
+    #    此时 event.stop_event() 会让 pipeline 直接放弃这次 LLM 调用
+    #    （internal.py: `if await call_event_hook(...OnLLMRequestEvent, req): return`）。
+    #    这才是"从源头掐断"——模型连消息都拿不到，自然不可能去调生图工具。
+    #
+    # ③ 钩子只影响**本插件**，不会动 AstrBot 全局的会话配置，
+    #    也不会影响其它插件和该群的正常聊天（如果机器人还接了别的插件）。
+    #    换句话说：黑名单群里的普通对话照常，只有生图彻底哑火。
+    #
+    # 代价说明：这个钩子一停，整个群的 LLM 请求都没了（不只是生图）。
+    # 这是"让 LLM 无视生图指令"的必然结果 —— 要它无视，就得让它收不到。
+    # 已经在提示词里写死也没用，因为模型压根不会收到这条消息。
+    @filter.on_llm_request()
+    async def _on_llm_request_block_blacklist(
+        self, event: AstrMessageEvent, req: Any = None
+    ) -> None:
+        """黑名单群直接掐断 LLM 请求。
+
+        静默：不发任何消息，只是让事件停下来。
+        """
+        if self.blacklist.is_blocked(event):
+            logger.debug(
+                "[Nai黑名单] 已掐断黑名单群的 LLM 请求（群 %s）",
+                event.get_group_id(),
+            )
+            event.stop_event()
+
     @_cmd("nai", {"nai"})
     async def nai_generate(self, event: AstrMessageEvent, args: GreedyStr):
         """NovelAI 生图
@@ -794,6 +900,14 @@ class Nai2ApiPlugin(Star):
         抽成独立方法，是为了让自定义命令名注册的别名也能复用它
         （别名走的是同一套逻辑，不然就得复制一份代码）。
         """
+        # 群聊黑名单第 1 层：整个命令链路直接静默丢弃。
+        # 放在**最前面**，是为了让黑名单群连"这是不是子命令"都判断不到 ——
+        # 包括 presets / balance / dict / save 这些子命令，全部一视同仁地哑火，
+        # 否则用户能从"能查余额但生不了图"这个差异推断出群被拉黑了。
+        blocked_cmd = self._blocked_command_result(event)
+        if blocked_cmd is not None:
+            return blocked_cmd
+
         # 注意：AstrBot 的 filter.command 已经把 wake_prefix（如 "/"）和命令名去除
         # 因此 args 就是命令后的完整原始文本，不需要再去除前缀
         args = args.strip() if args else ""
@@ -1242,6 +1356,11 @@ class Nai2ApiPlugin(Star):
             model(string): 模型，可选 "5"（V5，普通图 5 点）、"4.5"（V4.5，普通图 1 点）等，留空用默认
             strength(string): 图生图相似度 0~1。只有当用户在这条消息里回复了一张图片、且插件开了图生图时才有意义，留空用默认
         """
+        # 黑名单群：最先拦，连"禁用"都不提示（静默的前提是别多嘴）
+        blocked = self._blocked_tool_result(event)
+        if blocked is not None:
+            return blocked
+
         if not self._llm_tool_enabled:
             return mcp.types.CallToolResult(
                 content=[mcp.types.TextContent(type="text", text="生图功能已被管理员禁用")]
@@ -1350,6 +1469,10 @@ class Nai2ApiPlugin(Star):
         Args:
             detail(string): 返回详细程度，"simple" 精简版，"full" 完整版
         """
+        blocked = self._blocked_tool_result(event)
+        if blocked is not None:
+            return blocked
+
         try:
             data = await self.client.get_balance()
             result_text = self._build_balance_text(data)
@@ -1370,6 +1493,10 @@ class Nai2ApiPlugin(Star):
         Args:
             preset_name(string): 预设名称，填 "all" 或 "全部" 列出所有预设，填具体名称查看单个预设
         """
+        blocked = self._blocked_tool_result(event)
+        if blocked is not None:
+            return blocked
+
         all_presets = self.presets.list_all()
 
         # 列出所有预设
@@ -1422,6 +1549,10 @@ class Nai2ApiPlugin(Star):
             name(string): 预设名称（不能含空格）
             artist(string): 质量前缀/画师串
         """
+        blocked = self._blocked_tool_result(event)
+        if blocked is not None:
+            return blocked
+
         name = name.strip()
         artist = artist.strip()
         
@@ -1457,6 +1588,10 @@ class Nai2ApiPlugin(Star):
             name(string): 要修改的预设名称
             artist(string): 新的质量前缀/画师串
         """
+        blocked = self._blocked_tool_result(event)
+        if blocked is not None:
+            return blocked
+
         name = name.strip()
         artist = artist.strip()
 
@@ -1490,6 +1625,10 @@ class Nai2ApiPlugin(Star):
         Args:
             name(string): 要删除的预设名称
         """
+        blocked = self._blocked_tool_result(event)
+        if blocked is not None:
+            return blocked
+
         name = name.strip()
         
         if not name:
