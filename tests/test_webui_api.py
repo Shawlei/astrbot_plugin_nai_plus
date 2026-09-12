@@ -526,6 +526,8 @@ class _FakeEvent:
     def __init__(self, fail_image_times: int):
         self.fail_image_times = fail_image_times
         self.sent: list[tuple[str, str]] = []
+        # 发图「尝试」次数：成功和失败都算，用来断言重试开关到底发了几次
+        self.image_attempts = 0
 
     def image_result(self, p):
         return ("image", p)
@@ -535,9 +537,11 @@ class _FakeEvent:
 
     async def send(self, r):
         kind, payload = r
-        if kind == "image" and self.fail_image_times > 0:
-            self.fail_image_times -= 1
-            raise _FakeActionFailed()
+        if kind == "image":
+            self.image_attempts += 1
+            if self.fail_image_times > 0:
+                self.fail_image_times -= 1
+                raise _FakeActionFailed()
         self.sent.append(r)
 
 
@@ -556,6 +560,8 @@ plugin._do_generate = _fake_do_generate
 PluginCls._SEND_RETRY_DELAY = 0.0
 
 # 第一次发图失败、第二次成功 → 用户应正常收到图 + 标签，不该看到任何失败文案
+# （v1.4.5 起重试默认关闭，这里显式打开，验证「开了就还能救回来」）
+plugin._send_retry_on_timeout = True
 ev = _FakeEvent(fail_image_times=1)
 res = asyncio.run(plugin._run_generate_command(ev, "1girl", None, None, None, None, None, None))
 kinds = [k for k, _ in ev.sent]
@@ -570,6 +576,34 @@ text = res[1] if isinstance(res, tuple) else ""
 check("已经生成" in text and "生图失败" not in text, f"文案应说明图已生成而非生图失败: {text!r}")
 check(str(fake_img) in text, "文案应带上图片本地路径，方便用户自己去取")
 check("生图失败" not in text and "NodeIKernelMsgService" not in text, "不应把 NapCat 的一大段事件名直接甩给用户")
+# 重试已开启 → 不该再提示「可以去打开重试」
+check("发图超时自动重试" not in text, "重试已开启时不应再引导用户去开重试")
+
+# --- v1.4.5：默认关闭重试，只发一次（超时 ≠ 未送达，重发会重复）---
+plugin._send_retry_on_timeout = False
+ev = _FakeEvent(fail_image_times=99)   # 只要发图就失败
+res = asyncio.run(plugin._run_generate_command(ev, "1girl", None, None, None, None, None, None))
+img_sends = [k for k, _ in ev.sent if k == "image"]
+check(len(img_sends) == 0 and ev.image_attempts == 1,
+      f"关闭重试时只应尝试发一次图: attempts={ev.image_attempts}, sent={ev.sent}")
+check(isinstance(res, tuple) and res[0] == "plain", f"关闭重试时发图失败仍应返回文字说明: {res!r}")
+text_off = res[1] if isinstance(res, tuple) else ""
+check("已经生成" in text_off and str(fake_img) in text_off, f"关闭重试的失败文案仍要说明图已生成并给路径: {text_off!r}")
+check("发图超时自动重试" in text_off, "关闭重试时应引导用户去插件配置里打开「发图超时自动重试」")
+check("重复发图" in text_off, "提示里要讲清打开重试可能导致重复发图")
+
+# 关闭重试时，第一次就成功 → 正常发图，attempts 恰好 1
+ev = _FakeEvent(fail_image_times=0)
+res = asyncio.run(plugin._run_generate_command(ev, "1girl", None, None, None, None, None, None))
+check(res is None and ev.image_attempts == 1 and [k for k, _ in ev.sent][0] == "image",
+      f"关闭重试时首次成功应只发一次: attempts={ev.image_attempts}, sent={ev.sent}")
+
+# 真假边界：关闭重试时，若第 1 次失败第 2 次本可成功，也应直接放弃（不重发 → 不重复）
+ev = _FakeEvent(fail_image_times=1)
+res = asyncio.run(plugin._run_generate_command(ev, "1girl", None, None, None, None, None, None))
+check(ev.image_attempts == 1 and isinstance(res, tuple) and res[0] == "plain",
+      f"关闭重试时不应有第二次尝试: attempts={ev.image_attempts}, res={res!r}")
+plugin._send_retry_on_timeout = True   # 恢复，避免影响后续断言
 
 # 真正的生图失败（_do_generate 抛异常）仍然走老的「生图失败」分支
 async def _boom(*a, **k):
@@ -678,6 +712,105 @@ check("Output: 1girl, dania_(wuthering_waves), swimsuit" in sp, "达妮娅示例
 check("Output: 1girl, raiden shogun, purple hair" in sp, "雷电将军示例 1girl 应移到最前")
 check("depth of field, 1girl" not in sp and "depth of field\n" in sp, "赛博朋克城市示例不应脑补 1girl")
 check(schema["translate_system_prompt"]["default"] == sp, "_conf_schema.json 的 translate_system_prompt.default 必须与 SYSTEM_PROMPT 逐字节一致")
+
+# ---------------------------------------------------------------------------
+# 12. v1.4.5：图生图参考图落地（_fetch_reference_image）
+# ---------------------------------------------------------------------------
+# 背景（严重 bug）：v1.4.4 及以前写的是 `return await _materialize_image(first), None`，
+# 但 _materialize_image 是同步函数（内部 urllib），对 str 做 await 必然抛
+# TypeError: object str can't be used in 'await' expression，被外层 except 吞掉后
+# 静默降级成文生图 —— 也就是说图生图从这行代码写出来起一次都没成功过。
+# 修法：await asyncio.to_thread(_materialize_image, first)（既不阻塞事件循环，
+# 也不对普通返回值做 await）。
+#
+# 为什么要在测试里替换 extract_quoted_message_images：
+#   它在 _fetch_reference_image 内部 `from astrbot.core.utils.quoted_message import ...`
+#   动态导入，所以往 sys.modules 里塞一个同名假模块即可生效。
+
+# 一段合法的 1x1 PNG（base64），用来喂给 base64:// 分支
+_PNG_1X1_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAF"
+    "BQEAXc2mzQAAAABJRU5ErkJggg=="
+)
+
+_qm_mod = _mod("astrbot.core.utils.quoted_message")
+_qm_mod._refs: list = []          # 由每个用例自行设置
+_qm_mod._raise: Exception | None = None
+
+
+async def _fake_extract_quoted_message_images(event):
+    if _qm_mod._raise is not None:
+        raise _qm_mod._raise
+    return list(_qm_mod._refs)
+
+
+_qm_mod.extract_quoted_message_images = _fake_extract_quoted_message_images
+
+fetch_ref = plugin_main._fetch_reference_image
+
+# ① base64:// 形态 → 落地成本地临时文件，返回 (path, None) 且文件非空
+_qm_mod._refs = [f"base64://{_PNG_1X1_B64}"]
+path, err = asyncio.run(fetch_ref(object()))
+check(err is None, f"base64 参考图落地不应报错: err={err!r}")
+check(isinstance(path, str) and path, f"应返回本地路径字符串: {path!r}")
+mk_p = Path(path) if isinstance(path, str) else None
+check(mk_p is not None and mk_p.exists(), f"落地的临时文件应真实存在: {path!r}")
+check(mk_p is not None and mk_p.stat().st_size > 0, f"落地的临时文件不应是空文件: {path!r}")
+if mk_p is not None and mk_p.exists():
+    check(mk_p.read_bytes() == __import__("base64").b64decode(_PNG_1X1_B64),
+          "落地文件内容应与原始 base64 解码结果一致")
+    mk_p.unlink()   # 用完即删，别在 .tmp 里留垃圾
+
+# ② data:image/png;base64,... 形态 → 同样能落地
+_qm_mod._refs = [f"data:image/png;base64,{_PNG_1X1_B64}"]
+path2, err2 = asyncio.run(fetch_ref(object()))
+check(err2 is None and isinstance(path2, str) and Path(path2).exists(),
+      f"data URL 参考图也应能落地: path={path2!r}, err={err2!r}")
+if isinstance(path2, str) and Path(path2).exists():
+    check(Path(path2).stat().st_size > 0, "data URL 落地文件不应为空")
+    Path(path2).unlink()
+
+# ③ 已经被“落地过”的本地路径 → 原样返回
+local_p = tmp / "already_local.png"
+local_p.write_bytes(b"\x89PNG\r\n\x1a\nlocal")
+_qm_mod._refs = [str(local_p)]
+path3, err3 = asyncio.run(fetch_ref(object()))
+check(err3 is None and path3 == str(local_p), f"本地路径引用应原样返回: {path3!r}")
+
+# ④ 假模块返回 [] → (None, None)：没回复图片就是普通文生图，不是错误
+_qm_mod._refs = []
+path4, err4 = asyncio.run(fetch_ref(object()))
+check(path4 is None and err4 is None, f"没有参考图时应返回 (None, None) 而不是报错: {(path4, err4)!r}")
+
+# ⑤ 认不出的引用格式 → (None, 错误提示)，且不抛异常
+_qm_mod._refs = ["ftp://who/knows"]
+path5, err5 = asyncio.run(fetch_ref(object()))
+check(path5 is None and isinstance(err5, str) and err5, f"认不出的格式应返回错误提示: {(path5, err5)!r}")
+
+# ⑥ 读取被回复消息本身抛异常 → 也要兜住，给用户一句人话
+_qm_mod._raise = RuntimeError("quoted boom")
+path6, err6 = asyncio.run(fetch_ref(object()))
+check(path6 is None and isinstance(err6, str) and "boom" in err6,
+      f"读取被回复消息失败应兜住并给出提示: {(path6, err6)!r}")
+_qm_mod._raise = None
+
+# ⑦ 回归护栏：_materialize_image 必须是同步函数，且调用点不能对它直接 await
+import inspect as _inspect  # noqa: E402
+
+check(not _inspect.iscoroutinefunction(plugin_main._materialize_image),
+      "_materialize_image 应保持同步（同步函数才需要 to_thread 包装）")
+check(_inspect.iscoroutinefunction(fetch_ref), "_fetch_reference_image 应是协程函数")
+_src = (ROOT / "main.py").read_text(encoding="utf-8")
+# 注意：注释里会拿这个错误写法当反面教材，所以只检查「可执行代码行」——
+# 即出现了该模式、但所在行不是 # 注释的行
+_bad_lines = [
+    ln for ln in _src.splitlines()
+    if "await _materialize_image(" in ln and not ln.lstrip().startswith("#")
+]
+check(not _bad_lines,
+      f"main.py 的可执行代码里不应再出现 `await _materialize_image(...)`（v1.4.4 的致命写法）: {_bad_lines}")
+check("asyncio.to_thread(_materialize_image" in _src,
+      "main.py 应用 asyncio.to_thread(_materialize_image, ...) 调用")
 
 # ---------------------------------------------------------------------------
 # 汇总

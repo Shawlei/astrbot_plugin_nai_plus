@@ -195,6 +195,12 @@
     "type": "bool",
     "default": true
   },
+  "send_retry_on_timeout": {
+    "description": "发图超时自动重试",
+    "hint": "QQ（NapCat）发大图偶发「sendMsg Timeout」。开启：超时后隔 2 秒再发一次（可能收到两张重复的图，因为超时不代表真没发出去）。关闭：只发一次，超时就直接提示「图已生成但发送超时」并给本地路径（不会重复，但偶尔会漏图）。默认关闭",
+    "type": "bool",
+    "default": false
+  },
   "confirm_hd_size": {
     "description": "高扣点生图二次确认",
     "hint": "开启后，2K(15点)/4K(25点) 以及 V5 模型的普通尺寸(5点) 会先询问确认再生成，防止误扣",

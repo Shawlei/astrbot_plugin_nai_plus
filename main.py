@@ -292,7 +292,14 @@ async def _fetch_reference_image(event: AstrMessageEvent) -> tuple[str | None, s
     logger.info("[Nai2API] 从回复消息里拿到参考图: %s", str(first)[:120])
 
     try:
-        return await _materialize_image(first), None
+        # _materialize_image 是同步函数（内部用 urllib 做阻塞 IO），
+        # 这里必须用 to_thread 丢到线程池执行：
+        # 1) 直接 return _materialize_image(first) 会因为 urllib 阻塞
+        #    事件循环最多 30 秒，期间机器人其他消息全部停摆；
+        # 2) 写成 await _materialize_image(...) 更是错的 —— 对普通函数
+        #    的返回值做 await，必然抛 TypeError（就是 v1.4.4 及以前
+        #    图生图一直不可用的根因）。
+        return await asyncio.to_thread(_materialize_image, first), None
     except Exception as e:
         logger.warning("[Nai2API] 参考图落地失败: %s", e)
         return None, f"参考图下载/解码失败：{e}"
@@ -304,8 +311,9 @@ def _materialize_image(ref: str) -> str:
     引用可能是 http(s) URL、base64://、data URL 或本地路径，
     这里统一成路径，方便后续读成 bytes 发给渠道。
 
-    注意这是同步实现（用 urllib），因为调用点在做二次确认挂起时
-    需要立刻拿到结果；图都不大，可以接受。
+    注意这是**同步实现**（用 urllib 做阻塞 IO），不要直接 await 它。
+    调用方请用 ``await asyncio.to_thread(_materialize_image, ref)``，
+    这样既不阻塞事件循环，又能正常拿到返回值。
     """
     import base64 as _b64
     import tempfile
@@ -462,6 +470,9 @@ class Nai2ApiPlugin(Star):
         self._llm_tool_enabled = bool(config.get("llm_tool_enabled", True))
         self._show_image_info = bool(config.get("show_image_info", True))
         self._confirm_hd = bool(config.get("confirm_hd_size", True))
+        # 发图超时是否重试。默认关闭 —— 超时 ≠ 没发出去，
+        # 重试会让用户收到两张重复的图（详见 _send_image_with_info 注释）
+        self._send_retry_on_timeout = bool(config.get("send_retry_on_timeout", False))
 
         # 群聊黑名单：黑名单里的群彻底静默，绝不生图
         self.blacklist = GroupBlacklist(config.get("group_blacklist", ""))
@@ -1205,7 +1216,15 @@ class Nai2ApiPlugin(Star):
             logger.error("[PresetManager] 预设回写配置失败: %s", e)
 
     # 发图重试次数与间隔。QQ（NapCat / NTQQ）发大图偶发 `sendMsg Timeout`
-    # （retcode=1200），多数情况下隔一两秒再发一次就成功了。
+    # （retcode=1200）。
+    #
+    # 为什么默认**不**重试（v1.4.5 起）：
+    #   NapCat 报 `sendMsg Timeout` 时，图片经常其实已经发出去了，只是回执慢；
+    #   这时再发一次就会让用户收到两张一样的图。插件没法从超时本身判断
+    #   「到底送没送出去」，所以把选择权交给用户（配置项 send_retry_on_timeout）：
+    #     关闭（默认）＝ 只发一次，超时就提示「图已生成但发送超时」并给出本地路径。
+    #                    宁可偶尔漏图也不重复刷屏，且漏图有本地路径可补救。
+    #     开启        ＝ 超时后隔 _SEND_RETRY_DELAY 秒再发一次，宁可重发也不丢图。
     _SEND_RETRIES = 2
     _SEND_RETRY_DELAY = 2.0
 
@@ -1218,28 +1237,37 @@ class Nai2ApiPlugin(Star):
     ):
         """发送图片+信息标签。
 
-        发图失败会重试（见 _SEND_RETRIES）。重试仍失败时抛 ImageSendError，
-        让调用方能把「图已生成但发不出去」和「生图本身失败」区分开来 ——
-        这两种情况对用户的意义完全不同：前者点数已扣、图在本地，后者才是真没画出来。
+        重试策略由配置项 ``send_retry_on_timeout`` 决定（默认关闭，只发一次）：
+        开启时按 ``_SEND_RETRIES`` 重试。无论是否重试，最终仍失败时抛
+        ImageSendError，让调用方能把「图已生成但发不出去」和「生图本身失败」
+        区分开来 —— 这两种情况对用户的意义完全不同：前者点数已扣、图在本地，
+        后者才是真没画出来。
 
         为什么要区分（踩坑记录）：
             v1.4.2 之前生图和发图包在同一个 try 里，QQ 端 `NodeIKernelMsgService/sendMsg`
             超时（NapCat 的 retcode=1200）也会被记成「[Nai2API] 生图失败」，
             用户以为 NovelAI 挂了，实际是 QQ 客户端发大图慢了一步。
         """
+        # 关闭重试时只跑一轮循环（range(1, 2) == [1]）
+        retries = self._SEND_RETRIES if self._send_retry_on_timeout else 1
+
         last_err: Exception | None = None
-        for attempt in range(1, self._SEND_RETRIES + 1):
+        for attempt in range(1, retries + 1):
             try:
                 await event.send(event.image_result(str(image_path)))
                 last_err = None
                 break
             except Exception as e:  # noqa: BLE001 —— 平台适配器抛的类型五花八门
                 last_err = e
-                logger.warning(
-                    "[Nai2API] 发送图片失败（第 %d/%d 次）: %s",
-                    attempt, self._SEND_RETRIES, _short_err(e),
-                )
-                if attempt < self._SEND_RETRIES:
+                if retries > 1:
+                    logger.warning(
+                        "[Nai2API] 发送图片失败（第 %d/%d 次）: %s",
+                        attempt, retries, _short_err(e),
+                    )
+                else:
+                    # 未开启重试，没必要报「第 1/1 次」这种让人困惑的说法
+                    logger.warning("[Nai2API] 发送图片失败: %s", _short_err(e))
+                if attempt < retries:
                     await asyncio.sleep(self._SEND_RETRY_DELAY)
         if last_err is not None:
             raise ImageSendError(image_path, last_err) from last_err
@@ -1263,12 +1291,20 @@ class Nai2ApiPlugin(Star):
 
     def _send_failed_text(self, err: "ImageSendError") -> str:
         """图已生成但发不出去时给用户的说明。"""
-        return (
+        text = (
             "图片已经生成好了，但发到聊天里时超时了（是 QQ 客户端那边没响应，"
             "NovelAI 那边是正常的，点数已正常消耗）。\n"
             f"图片已保存在服务器：{err.image_path}\n"
             "可以稍等几秒再试一次，如果反复出现，请检查 NapCat / QQ 客户端是否卡顿。"
         )
+        if not self._send_retry_on_timeout:
+            # 关闭重试时主动指条明路：这类超时多数其实没发出去，
+            # 想要「宁可重发也不丢图」的用户可以自己去开
+            text += (
+                "\n如果经常这样，可以在插件配置里打开「发图超时自动重试」"
+                "（但可能出现重复发图）。"
+            )
+        return text
 
     def _build_info_label(
         self, preset_name: str | None, elapsed: float, model: str | None = None,
