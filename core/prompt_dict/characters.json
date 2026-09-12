@@ -202,7 +202,8 @@
     "柚叶": "yuzuha",
     "浮波柚叶": "yuzuha",
     "苍角": "soukaku",
-    "露西亚": "lucia",
+    "卢西娅": "lucia elowen",
+    "卢西娅艾洛温": "lucia elowen",
     "爱丽丝(绝区零)": "alice thymefield"
   },
   "bluearchive": {
@@ -214,8 +215,8 @@
     "星野": "takanashi hoshino",
     "黑见芹香": "kuromi serika",
     "芹香": "kuromi serika",
-    "阿罗娜": "arona_(blue archive)",
-    "普拉娜": "plana_(blue archive)",
+    "阿罗娜": "arona (blue archive)",
+    "普拉娜": "plana (blue archive)",
     "空崎日奈": "sorasaki hina",
     "日奈": "sorasaki hina",
     "天童爱丽丝": "tendou aris",
@@ -246,7 +247,8 @@
     "银灰": "silverash_(arknights)",
     "陈": "chen_(arknights)",
     "初雪": "pramanix_(arknights)",
-    "艾雅法拉": "ifrit_(arknights)",
+    "艾雅法拉": "eyjafjalla_(arknights)",
+    "伊芙利特": "ifrit_(arknights)",
     "夜莺": "nightingale_(arknights)",
     "斯卡蒂": "skadi_(arknights)",
     "塞雷娅": "saria_(arknights)",
@@ -259,12 +261,13 @@
     "安洁莉娜": "angelina_(arknights)",
     "凯尔希": "kal'tsit",
     "史尔特尔": "surtr_(arknights)",
-    "焰尾": "nearl_(arknights)",
+    "焰尾": "flametail_(arknights)",
+    "临光": "nearl_(arknights)",
     "令": "ling_(arknights)",
     "夕": "dusk_(arknights)",
-    "黑键": "mudrock_(arknights)",
-    "歌蕾蒂娅": "gladiia_(arknights)",
-    "阿尔托莉雅": "artoria pendragon"
+    "黑键": "ebenholz_(arknights)",
+    "泥岩": "mudrock_(arknights)",
+    "歌蕾蒂娅": "gladiia_(arknights)"
   },
   "fgo_fate": {
     "FGO": "fate/grand_order",
@@ -828,7 +831,11 @@
     "saber": "artoria pendragon"
   },
   "game_others": {
-    "_comment": "主机 / 单机游戏角色（最终幻想、尼尔、生化危机、古墓丽影、守望先锋等）",
+    "_comment": "主机 / 单机游戏角色（最终幻想、尼尔、生化危机、古墓丽影、守望先锋等）。角色消歧标签用 NovelAI 官方推荐的空格写法 `name (series)`，与词库其他组的下划线写法效果等价",
+    "守望先锋": "overwatch",
+    "尼尔机械纪元": "nier:automata",
+    "尼尔": "nier (series)",
+    "最终幻想": "final fantasy",
     "蒂法": "tifa lockhart",
     "爱丽丝盖恩斯巴勒": "aerith gainsborough",
     "尤菲": "yuffie kisaragi",

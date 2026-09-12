@@ -28,7 +28,7 @@
 - LLM Tool 调用生图（AI 助手可直接调用）
 - 支持 NovelAI V5 最新模型（含 V5 Full / V5 Curated）
 - **提示词直译**：中文/英文都会自动翻成 NovelAI 英文标签，不用自己写标签
-- **内置 1572 条词库**：角色名 / 外观 / 场景直接查表，不走模型 —— 角色名 100% 准确，纯标签输入生图更快
+- **内置 1576 条词库**：角色名 / 外观 / 场景直接查表，不走模型 —— 角色名 100% 准确，纯标签输入生图更快
 - **翻译结果校验**：翻完检查有没有残留中文，有就自动重翻，防止模型「翻一半交卷」
 - **翻译模型轮询**：配多个翻译模型，前一个失败自动换下一个
 - **OpenAI 兼容接口配置友好**：地址/密钥分开填，模型可从接口实时拉取下拉选择
@@ -296,7 +296,7 @@ denoising_strength={{strength}}
                  → 没命中的才交给翻译模型 → 校验有没有残留中文
 ```
 
-实测效果（22 条真实提示词，1572 条内置词库）：
+实测效果（22 条真实提示词，1576 条内置词库）：
 
 | 输入类型 | 词条命中率 | 是否调用模型 |
 |---------|-----------|------------|
@@ -329,23 +329,29 @@ denoising_strength={{strength}}
 
 | 文件 | 内容 | 条数 |
 |------|------|------|
-| `core/prompt_dict/characters.json` | 角色名：原神 / 崩铁 / 绝区零 / 蔚蓝档案 / 明日方舟 / FGO / 东方 Project / 经典动画 / VTuber / 战双 / 鸣潮 / 单机游戏 | **823** |
+| `core/prompt_dict/characters.json` | 角色名：原神 / 崩铁 / 绝区零 / 蔚蓝档案 / 明日方舟 / FGO / 东方 Project / 经典动画 / VTuber / 战双 / 鸣潮 / 单机游戏 | **830** |
 | `core/prompt_dict/appearance.json` | 发色发型 / 眼睛 / 表情 / 体型 / 服装 / 姿势 / 镜头 | **469** |
-| `core/prompt_dict/scene.json` | 环境背景 / 画风 / 动作 / 构图 | **280** |
-| 合计 | 3 个文件 | **1572** |
+| `core/prompt_dict/scene.json` | 环境背景 / 画风 / 动作 / 构图 | **277** |
+| 合计 | 3 个文件 | **1576** |
 
-合计 **1572 条**（去重后加载 **1572 条**）。角色名全部对照 Danbooru 官方标签，不做音译。
+合计 **1576 条**（去重后加载 **1569 条** —— 有 7 个中文键在不同分组里重复出现，值相同，属于冗余不算错）。角色名全部对照 Danbooru 官方标签，不做音译。
 
-`characters.json` 覆盖的作品（19 个分组）：
+> **关于「空格」和「下划线」**：NovelAI 官方文档明确 V4 及以上模型**建议用空格不用下划线**（`white hair` 而不是 `white_hair`）。词库里两种写法都有：`amiya_(arknights)` 是 Danbooru 原生格式、`arona (blue archive)` 是 NovelAI 推荐格式，**效果等价**，NovelAI 都认。唯一不行的是括号内混写（`arona_(blue archive)`），这次已全部统一。
+>
+> **纯英文键也能命中**：`2b` → `2b (nier:automata)`、`saber` → `artoria pendragon`、`hk416` → `hk416_(girls'_frontline)`（大小写不敏感）。用户随手打简写，词库自动补全成完整消歧标签。
+>
+> **英文多词标签不会被切碎**：`1girl, long hair, blue eyes` 原样保留。但中英混排（`白发 white hair`）会按空格切，英文碎片原样保留 —— 想让英文标签完整就用逗号隔开，这也是 NovelAI 的规范写法。
+
+`characters.json` 覆盖的作品（20 个分组）：
 
 | 分组 | 条数 | 分组 | 条数 |
 |------|------|------|------|
 | 原神 | 97 | 东方 Project | 94 |
-| 经典动画 | 198 | 崩坏：星穹铁道 | 63 |
-| hololive | 57 | 绝区零 | 38 |
+| 经典动画 | 224 | 崩坏：星穹铁道 | 63 |
+| hololive | 57 | 绝区零 | 39 |
 | 蔚蓝档案 | 32 | 其他 VTuber（含 Vocaloid） | 32 |
-| 明日方舟 | 25 | Fate / Grand Order | 22 |
-| 彩虹社 | 16 | 单机游戏（FF / 尼尔 / 生化 / OW 等） | 15 |
+| 明日方舟 | 27 | Fate / Grand Order | 22 |
+| 彩虹社 | 16 | 单机游戏（FF / 尼尔 / 生化 / OW 等） | 19 |
 | 碧蓝航线 | 13 | 赛马娘 | 12 |
 | 崩坏 3 | 10 | 公主连结 | 10 |
 | 少女前线 | 7 | Fate / TYPE-MOON | 4 |
@@ -1131,7 +1137,7 @@ astrbot_plugin_nai_plus/
 │   ├── nai2api_client.py   # Nai2API 客户端（/generate 请求、扣点计算）
 │   ├── translate_manager.py # 提示词直译（词库直译 + 模型翻译 + 结果校验）
 │   ├── prompt_dict.py      # 词库加载、切分与替换
-│   ├── prompt_dict/        # 内置词库（角色/外观/场景，共 1572 条）
+│   ├── prompt_dict/        # 内置词库（角色/外观/场景，共 1576 条）
 │   │   ├── characters.json
 │   │   ├── appearance.json
 │   │   └── scene.json
@@ -1139,6 +1145,8 @@ astrbot_plugin_nai_plus/
 │   ├── image_manager.py    # 图片保存和缓存管理
 │   ├── group_blacklist.py  # 群聊黑名单（群号解析 + 命中判断）
 │   └── preset_manager.py   # 预设加载和保存（双来源合并 + 回写 WebUI 配置）
+├── tests/
+│   └── test_prompt_dict_quality.py  # 词库健康度回归测试（不依赖 AstrBot，可直接跑）
 └── persona/
     └── nai_artist_persona.md  # 生图助手人格提示词（System Prompt）
 ```

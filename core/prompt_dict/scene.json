@@ -176,7 +176,6 @@
     "动态": "motion blur",
     "残影": "motion blur",
     "景深效果": "depth of field",
-    "广角镜头": "wide angle",
     "浅景深": "shallow depth of field"
   },
   "action": {
@@ -276,7 +275,6 @@
     "广角镜头": "wide shot",
     "远景构图": "wide shot",
     "视角": "from viewer",
-    "正面": "from front",
     "斜侧面": "three quarter view",
     "四分之三侧面": "three quarter view",
     "鸟瞰": "from above, bird's eye view",
@@ -285,7 +283,6 @@
     "荷兰角": "dutch angle",
     "倾斜构图": "dutch angle",
     "构图": "composition",
-    "背景虚化": "depth of field",
     "景深": "depth of field"
   }
 }

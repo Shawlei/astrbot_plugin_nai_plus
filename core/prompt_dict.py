@@ -146,8 +146,17 @@ def load_builtin_dict() -> dict[str, str]:
 # 切分
 # ---------------------------------------------------------------------------
 
-# 切分时要丢掉的标点（保留逗号作为主分隔符，先统一处理）
+# 切分时要丢掉的标点。
+#
+# 空格 `\s` 也是分隔符，这是给**中文输入**设计的（「白发 双马尾 微笑」）。
+# 但它有个副作用：英文多词标签（`white hair`）会被切成 `white` + `hair`，
+# 拼回去变成 `white, hair` —— 在 NovelAI 里这是两个概念，不是「白色的头发」。
+# 所以英文片段在切分后还要走一遍 `_reglue_ascii()` 把它们重新粘回去，
+# 见下方。不能干脆去掉 `\s`，否则「白发 双马尾」会整体查不到。
 _SPLIT_RE = re.compile(r"[,，、;；\s]+")
+
+# 只按「明确的分隔符」切，不按空格切 —— 用于判断哪些片段原本是同一个逗号项
+_HARD_SPLIT_RE = re.compile(r"[,，、;；]+")
 
 # 不应被当作「可翻译词」的片段：NovelAI 权重语法、画师标签、纯英文标签
 # 这些要么不能被替换（权重要原样保留），要么本来就是英文（不用查表）
@@ -228,10 +237,37 @@ def split_segments(text: str) -> list[str]:
 
     先保护权重语法，再按分隔符切，最后还原受保护片段。
     返回的片段保留它们之间的分隔符信息由调用方自己处理（当前用逗号 join）。
+
+    ## 英文多词标签不切碎
+
+    切分是两层的：先按逗号等「硬分隔符」切成大项，每个大项内部再按空格切。
+    但如果一个大项**全是 ASCII 且不含中文**（`white hair`、`2b (nier:automata)`、
+    `long hair`），就**不再按空格切**，整个大项作为一个片段。
+
+    为什么：NovelAI 官方推荐的标签写法就是带空格的（`white hair`，而不是
+    `white_hair`），用户直接贴一段英文 prompt 是很常见的用法。旧逻辑会把
+    `1girl, long hair, blue eyes` 切成 `1girl, long, hair, blue, eyes` ——
+    5 个碎片，「长发」「蓝眼」两个概念直接没了，出图完全不对。
+
+    中文大项（`白发 双马尾`）仍按空格切，因为用户用空格分隔中文标签也很常见，
+    而且中文标签本身不含空格，不存在切碎问题。
+
+    中英混排大项（`白发 white hair`）比较少见，按空格切：中文部分会各自查表，
+    英文碎片原样保留。这是可接受的折中 —— 用户如果想让英文标签保持完整，
+    用逗号隔开就好，这也是 NovelAI 本来的规范写法。
     """
     protected, stash = _protect(text or "")
-    parts = [p.strip() for p in _SPLIT_RE.split(protected) if p.strip()]
-    return [_restore(p, stash) for p in parts]
+    out: list[str] = []
+    for chunk in _HARD_SPLIT_RE.split(protected):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if not _HAS_CJK_RE.search(chunk):
+            # 纯英文大项：整体保留（内部多个空格收敛成一个）
+            out.append(re.sub(r"\s+", " ", chunk))
+            continue
+        out.extend(p for p in _SPLIT_RE.split(chunk) if p.strip())
+    return [_restore(p.strip(), stash) for p in out]
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +296,14 @@ class PromptDictionary:
         self.builtin = load_builtin_dict()
         self.user = self._load_user_dict(user_path)
         self.entries: dict[str, str] = {**self.builtin, **self.user}
+
+        # 纯英文键的大小写不敏感索引。词库里 `HK416`/`MEIKO` 是大写、`saber`
+        # 是小写，用户怎么打都该命中。只给不含中文的键建这张表 —— 中文键没有
+        # 大小写问题，全建一遍白占内存。有原样键优先，索引只做兜底。
+        self._ascii_lower: dict[str, str] = {
+            zh.lower(): en for zh, en in self.entries.items()
+            if zh and not _HAS_CJK_RE.search(zh)
+        }
 
         # 子串模式要按长度从长到短替换，否则「黑」会先吃掉「黑猫」的一部分
         self._by_length = sorted(self.entries.items(), key=lambda kv: -len(kv[0]))
@@ -298,10 +342,17 @@ class PromptDictionary:
     # -- 查询 ---------------------------------------------------------------
 
     def lookup(self, term: str) -> str | None:
-        """查一个词，返回英文标签；查不到返回 None"""
+        """查一个词，返回英文标签；查不到返回 None
+
+        原样键优先；不含中文的词再用小写兜底一次（`hk416` 也能命中 `HK416`）。
+        """
         if not self.enabled or not term:
             return None
-        return self.entries.get(term.strip())
+        key = term.strip()
+        hit = self.entries.get(key)
+        if hit is None and key and not _HAS_CJK_RE.search(key):
+            hit = self._ascii_lower.get(key.lower())
+        return hit
 
     def lookup_segment(self, segment: str) -> str | None:
         """查一个切分后的片段。
@@ -414,9 +465,22 @@ def apply_dictionary(
 
     for seg in segments:
         # 纯英文/纯符号片段不算「未命中」——它本来就不需要翻译，
-        # 直接原样保留，这样才不会把大量英文输入误判成「要调模型」
+        # 查不到就原样保留，这样才不会把大量英文输入误判成「要调模型」。
+        #
+        # 但**要先查一次表**再放行。词库里有一批纯英文键（`2b`、`dva`、
+        # `saber`、`HK416`、`MEIKO`……），它们存在的意义是把用户随手打的
+        # 简写补全成 Danbooru 的完整消歧标签（`2b` → `2b (nier:automata)`）。
+        # 曾经这里是「不含中文直接跳过」，导致这 20 多条键从上线起就一次
+        # 都没命中过 —— 用户打 `2b`，出图时模型只拿到孤零零的 `2b`，
+        # 经常画成别的东西。大小写兜底在 `lookup()` 里做（`hk416` 也能命中
+        # `HK416`），这里只管查。
         if not has_cjk(seg):
-            out_parts.append(seg)
+            en = dictionary.lookup_segment(seg)
+            if en and en != seg:
+                hits.append(seg)
+                out_parts.append(en)
+            else:
+                out_parts.append(seg)
             continue
 
         en = dictionary.lookup_segment(seg)
