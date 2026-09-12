@@ -1,0 +1,8 @@
+{
+  "pages": {
+    "nai-config": {
+      "title": "NovelAI Settings",
+      "description": "Visual panel for artist string / quality prefix, negative prompt and presets. Changes take effect immediately."
+    }
+  }
+}

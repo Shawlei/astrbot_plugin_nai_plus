@@ -15,7 +15,7 @@ desc: >
   支持图生图（回复一张图再发指令），后端是通用 HTTP 模板，
   任何支持图生图的渠道填好请求模板即可接入。
   基于 helloWKQ/AstrBot_Nai2API 二开。
-version: 1.4.0
+version: 1.5.0
 author: Shawlei
-astrbot_version: ">=4.16.0,<5"
+astrbot_version: ">=4.26.0,<5"
 repo: https://github.com/Shawlei/astrbot_plugin_nai_plus

@@ -3,6 +3,65 @@
 > 说明：本仓库自 v1.0.0 起独立计数（原项目基于 helloWKQ/AstrBot_Nai2API 二开，
 > 早期内部迭代过 v1.2.0 / v1.3.x，为对接 AstrBot 插件市场，版本号从 1.0.0 重新开始）。
 
+## v1.5.0
+
+新增一个**独立的 WebUI 管理面板**，放在 AstrBot「插件」页 → 本插件详情页里。以前改画师串、负向词只能在配置页的小输入框里硬改，看不到最终拼出来是什么；现在有专门的页面了。
+
+### 新增：NovelAI 配置管理面板
+
+入口：AstrBot Dashboard → 插件 → `Nai2API 生图（nai_plus 增强版）` → 页面「NovelAI 配置管理」。
+
+面板里有四块：
+
+| 区块 | 能做什么 |
+|------|---------|
+| **画师串 / 质量前缀** | 大文本框编辑 `default_artist`，实时显示字符数 / 标签数、未保存提示；一键追加 NovelAI 官方质量词（`best quality` / `very aesthetic` / `masterpiece`…）；「重置为默认」 |
+| **负向词** | 同上，编辑 `default_negative`，一键追加官方推荐负向词 |
+| **拼接预览** | 输一段正向词，直接看到**最终发给 NovelAI 的正向 / 负向串**：画师串拼在哪、`-2::green::` 这类负权重挪去了哪、有没有自动补 `full body, standing`。用的是文本框里**当前**的内容，不用先保存 |
+| **预设管理** | 自定义预设新增 / 编辑 / 删除；内置 5 个预设只读展示，但可以「复制为新预设」再改，或一键「设为默认画师串」 |
+
+改完点保存**立即生效**，不用重载插件。主题跟随 AstrBot 的亮 / 暗色。
+
+### 数据一致性（重要）
+
+面板、`/nai save / del / update` 指令、配置页的「预设管理」列表，三个入口操作的是**同一份数据**：
+
+- 画师串 / 负向词写进插件自己的配置文件（`data/config/astrbot_plugin_nai_plus_config.json`），和配置页改的是同一个键
+- 预设全部走 `PresetManager` → `_persist_presets_to_config()` 回写，和指令走同一条路
+- 预设名的校验规则（不能有空格、不能和内置重名、画师串不能为空）和启动时的 `parse_webui_presets()` 完全一致——不然这边存进去、重载时那边又静默丢掉，用户会一头雾水
+
+### 踩坑记录：`context.get_config()` 不是插件配置
+
+第一版后端用了 `self.context.get_config().save_config_async({...})`，看起来很合理，实际上 `Context.get_config()` 返回的是 **AstrBot 全局配置**（`data/cmd_config.json`，装的是 dashboard 密码、平台适配器那些）。往里写 `default_artist` 只会污染全局配置文件，插件下次启动根本读不到。
+
+正确做法：构造函数传进来的 `config` 本身就是一个 `AstrBotConfig` 对象，绑定的是插件自己的配置文件，直接 `self.config.save_config_async({...})` 就对了。
+
+### 修复：`/nai save` 加的预设重载后消失（老 bug，被新测试抓出来）
+
+顺着上面这个坑往下查，发现 v1.3.1 加的 `_persist_presets_to_config()`（指令改完预设回写配置）用的也是 `context.get_config()`。全局配置里没有 `custom_presets` 这个键，函数里 `if "custom_presets" not in cfg: return` 永远成立——**它从上线起就一次盘都没写过**，只是静默 return，日志级别还是 debug 所以没人发现。
+
+表现：`/nai save 名字 画师串` 当时能用，重载插件后预设没了（配置页的旧列表把 presets.json 盖掉了）。现在改成写 `self.config`，新增的 `tests/test_webui_api.py` 里有断言锁定「保存预设后插件配置里必须有它」。
+
+### 版本要求变更
+
+- `astrbot_version` 从 `>=4.16.0` 升到 **`>=4.26.0`**。面板后端用了 `astrbot.api.web`（`json_response` / `error_response` / `request`），这个模块是 AstrBot 4.26.0 才有的
+- 老版本 AstrBot 装了也不会炸：`_register_webui_apis()` 里 `ImportError` 直接跳过并打一行日志，只是没有面板，`/nai` 指令一切照旧
+
+### 仓库卫生：移除误提交的 `data/` 目录
+
+原仓库把 `data/cmd_config.json`（**AstrBot 全局配置**，里面有 dashboard 的密码哈希）和 `data/t2i_templates/*.html`（AstrBot 自带的文转图模板）一起提交进来了。这两样都不是插件的东西，插件代码一处都没引用；密码哈希放在公开仓库里更是不该。
+
+这次从 git 里移除（`git rm --cached`，本地文件不动），并把 `data/` 加进 `.gitignore`。
+**如果那个哈希对应的是你正在用的 dashboard 密码，建议改一次密码**——文件虽然删了，git 历史里还能翻到。
+
+### 文件变化
+
+- 新增 `pages/nai-config/{index.html,app.js,style.css}` —— 面板前端（原生 JS，无构建步骤）
+- 新增 `.astrbot-plugin/i18n/{zh-CN,en-US}.json` —— 页面标题 / 描述的多语言
+- 新增 `tests/test_webui_api.py` —— 面板后端回归测试（56 项断言，stub 掉 AstrBot 离线可跑），重点锁「配置写对文件、不污染全局配置、老版本 AstrBot 不炸」
+- `main.py` 新增 `_register_webui_apis()`，注册 5 个接口：`config`(GET)、`config/artist`、`config/negative`、`presets`、`preview`(POST)
+
+
 ## v1.4.0
 
 对照 NovelAI 官方文档和 Danbooru 官方标签，把内置词库和切词逻辑过了一遍。修了 3 个「画出来不对」的隐性 bug，顺手把英文输入的处理补齐。

@@ -453,6 +453,288 @@ class Nai2ApiPlugin(Star):
         # filter.command 是在类定义时（导入阶段）执行的，那时候还读不到用户配置，
         # 所以配置里的额外名字只能在这里补救：给每个别名动态挂一个同逻辑的处理器。
         self._register_extra_commands()
+        
+        # 注册 WebUI 管理面板的后端 API（需要 AstrBot >= 4.26.0）
+        self._register_webui_apis()
+
+    def _register_webui_apis(self) -> None:
+        """注册「插件 Pages」WebUI 管理面板的后端 API。
+
+        页面文件在 pages/nai-config/，前端通过 AstrBot 注入的 bridge SDK 调这些接口。
+
+        为什么写在 try 里、失败只记日志：
+            `astrbot.api.web` 是 AstrBot 4.26.0 才有的模块。用户如果装的是老版本，
+            这里会 ImportError。按「容错底线」原则，WebUI 面板不可用 ≠ 插件不可用，
+            所以静默跳过，/nai 指令照常能用。
+
+        为什么用 self.config 而不是 context.get_config()：
+            这是踩过的坑。`context.get_config()` 返回的是 **AstrBot 全局配置**
+            （data/cmd_config.json，里面是 dashboard 密码、平台适配器这些），
+            往里写 default_artist 只会污染全局配置，插件根本读不到。
+            插件自己的配置是构造函数传进来的 `config`，它本身就是一个 AstrBotConfig
+            对象，绑定的是 data/config/astrbot_plugin_nai_plus_config.json，
+            `save_config_async()` 会写到正确的文件。
+
+        接口一览（bridge 端 endpoint 不带插件名前缀）：
+            GET  config                 读取画师串 / 负向词 / 自定义预设 / 内置预设 / 默认值
+            POST config/artist          保存画师串           {"value": "..."}
+            POST config/negative        保存负向词           {"value": "..."}
+            POST presets                预设增删改           {"action": "add|update|delete", "data": {...}}
+            POST preview                预览最终拼接结果      {"prompt": "...", "artist": "...", "negative": "..."}
+
+        返回约定（和 bridge SDK 的兼容规则对齐）：
+            成功 → json_response({...业务字段...})，前端直接拿到这个对象
+            失败 → error_response("原因", status_code=4xx/5xx)，前端 await 会抛 Error
+        """
+        try:
+            from astrbot.api.web import error_response, json_response, request
+        except ImportError:
+            logger.info(
+                "[Nai WebUI] 当前 AstrBot 版本没有 astrbot.api.web（需要 >= 4.26.0），"
+                "WebUI 管理面板不可用，指令功能不受影响"
+            )
+            return
+
+        register = getattr(self.context, "register_web_api", None)
+        if not callable(register):
+            logger.info("[Nai WebUI] 当前 AstrBot 不支持 register_web_api，跳过面板注册")
+            return
+
+        import json as _json
+
+        from .core.preset_manager import (
+            BUILTIN_PRESETS,
+            ensure_composition,
+            split_negative_weights,
+        )
+
+        # ---- 工具函数 ------------------------------------------------------
+
+        def _schema_defaults() -> dict[str, str]:
+            """从 _conf_schema.json 读默认画师串 / 负向词，给前端「重置为默认」用。
+
+            不直接用 nai2api_client 里的 DEFAULT_* 常量，是因为 schema 才是用户
+            在配置页看到的那份默认值，两边理论上一致，但以 schema 为准更稳。
+            读失败就退回常量，绝不抛错。
+            """
+            defaults = {"default_artist": DEFAULT_ARTIST, "default_negative": DEFAULT_NEGATIVE}
+            schema_path = Path(__file__).parent / "_conf_schema.json"
+            try:
+                with open(schema_path, "r", encoding="utf-8") as f:
+                    schema = _json.load(f)
+                for key in defaults:
+                    val = schema.get(key, {}).get("default")
+                    if isinstance(val, str):
+                        defaults[key] = val
+            except Exception as e:  # 文件被改坏也不能影响接口
+                logger.debug("[Nai WebUI] 读取 schema 默认值失败，使用内置常量: %s", e)
+            return defaults
+
+        async def _save_plugin_config(patch: dict) -> bool:
+            """把改动写进插件自己的配置文件。
+
+            self.config 是 AstrBotConfig（dict 子类）。新版有 save_config_async，
+            老版只有同步 save_config，两种都兼容。
+            """
+            cfg = self.config
+            save_async = getattr(cfg, "save_config_async", None)
+            if callable(save_async):
+                ok = await save_async(patch)
+                # save_config_async 返回 False 表示被更新的快照顶掉了（并发写），
+                # 数据本身已经 update 进内存，不算失败。
+                return ok is not False
+            save_sync = getattr(cfg, "save_config", None)
+            if callable(save_sync):
+                save_sync(patch)
+                return True
+            # 既没有 save 方法（比如测试里传了个裸 dict），至少更新内存
+            if isinstance(cfg, dict):
+                cfg.update(patch)
+            return False
+
+        def _custom_presets_payload() -> list[dict[str, str]]:
+            """自定义预设列表（给前端展示用，字段和 template_list 一致）。"""
+            return [
+                {"name": name, "artist": info.get("artist", ""), "desc": info.get("desc", "")}
+                for name, info in self.presets.list_custom().items()
+            ]
+
+        def _builtin_presets_payload() -> list[dict[str, str]]:
+            return [
+                {"name": name, "artist": info.get("artist", ""), "desc": info.get("desc", "")}
+                for name, info in BUILTIN_PRESETS.items()
+            ]
+
+        def _validate_preset_name(name: str, *, allow_builtin: bool = False):
+            """预设名校验。返回错误文案；合法返回 None。
+
+            规则和 parse_webui_presets() 保持一致：不然这边保存成功、
+            插件重载时那边又把它丢掉，用户会一头雾水。
+            """
+            if not name:
+                return "预设名不能为空"
+            if " " in name:
+                return "预设名不能含空格（/nai -p 名字 是靠空格切参数的）"
+            if not allow_builtin and name in BUILTIN_PRESETS:
+                return f"「{name}」是内置预设，不能覆盖（会让 /nai -p {name} 的效果和文档不一致）"
+            return None
+
+        # ---- 接口 ----------------------------------------------------------
+
+        async def api_get_config():
+            """GET config"""
+            try:
+                cfg = self.config
+                defaults = _schema_defaults()
+                return json_response(
+                    {
+                        "artist": str(cfg.get("default_artist", "") or ""),
+                        "negative": str(cfg.get("default_negative", "") or ""),
+                        "auto_composition": bool(cfg.get("auto_composition", True)),
+                        "quality_weight": bool(cfg.get("translate_quality_weight", True)),
+                        "quality_weight_value": str(cfg.get("translate_quality_weight_value", "1.2") or "1.2"),
+                        "defaults": {
+                            "artist": defaults["default_artist"],
+                            "negative": defaults["default_negative"],
+                        },
+                        "custom_presets": _custom_presets_payload(),
+                        "builtin_presets": _builtin_presets_payload(),
+                        "version": "1.5.0",
+                    }
+                )
+            except Exception as e:
+                logger.error("[Nai WebUI] 读取配置失败: %s", e, exc_info=True)
+                return error_response(f"读取配置失败: {e}", status_code=500)
+
+        async def api_save_artist():
+            """POST config/artist  {"value": "..."}"""
+            try:
+                payload = await request.json(default={}) or {}
+                value = str(payload.get("value", "") or "").strip()
+                await _save_plugin_config({"default_artist": value})
+                # 让当前进程立刻生效，不用等重载
+                self.client.default_artist = value
+                return json_response({"saved": True, "artist": value})
+            except Exception as e:
+                logger.error("[Nai WebUI] 保存画师串失败: %s", e, exc_info=True)
+                return error_response(f"保存失败: {e}", status_code=500)
+
+        async def api_save_negative():
+            """POST config/negative  {"value": "..."}"""
+            try:
+                payload = await request.json(default={}) or {}
+                value = str(payload.get("value", "") or "").strip()
+                await _save_plugin_config({"default_negative": value})
+                self.client.default_negative = value
+                return json_response({"saved": True, "negative": value})
+            except Exception as e:
+                logger.error("[Nai WebUI] 保存负向词失败: %s", e, exc_info=True)
+                return error_response(f"保存失败: {e}", status_code=500)
+
+        async def api_presets():
+            """POST presets  {"action": "add|update|delete", "data": {"name","artist","desc"}}
+
+            全部走 PresetManager，再用 _persist_presets_to_config() 回写配置 ——
+            和 /nai save / del / update 指令走的是同一条路，保证三处（面板 / 指令 /
+            配置页 template_list）看到的永远是同一份数据。
+            """
+            try:
+                payload = await request.json(default={}) or {}
+                action = str(payload.get("action", "") or "").strip().lower()
+                data = payload.get("data") or {}
+                if not isinstance(data, dict):
+                    return error_response("data 必须是对象", status_code=400)
+
+                name = str(data.get("name", "") or "").strip()
+                artist = str(data.get("artist", "") or "").strip()
+                desc = str(data.get("desc", "") or "").strip()
+
+                if action == "delete":
+                    if not name:
+                        return error_response("预设名不能为空", status_code=400)
+                    if self.presets.is_builtin(name) and name not in self.presets.list_custom():
+                        return error_response("内置预设不能删除", status_code=400)
+                    if not self.presets.delete(name):
+                        return error_response(f"预设「{name}」不存在", status_code=404)
+
+                elif action in ("add", "update"):
+                    err = _validate_preset_name(name)
+                    if err:
+                        return error_response(err, status_code=400)
+                    if not artist:
+                        return error_response("画师串 / 质量前缀不能为空", status_code=400)
+                    if action == "update" and name not in self.presets.list_custom():
+                        return error_response(f"预设「{name}」不存在，无法修改", status_code=404)
+                    if action == "add" and name in self.presets.list_custom():
+                        return error_response(f"预设「{name}」已存在，请改用编辑", status_code=409)
+                    # save() 对新增和覆盖都适用
+                    self.presets.save(name, artist, desc)
+
+                else:
+                    return error_response(f"未知操作: {action!r}", status_code=400)
+
+                await self._persist_presets_to_config()
+                return json_response({"saved": True, "custom_presets": _custom_presets_payload()})
+            except Exception as e:
+                logger.error("[Nai WebUI] 预设操作失败: %s", e, exc_info=True)
+                return error_response(f"操作失败: {e}", status_code=500)
+
+        async def api_preview():
+            """POST preview  {"prompt": "...", "artist": "...", "negative": "..."}
+
+            把 nai2api_client.generate() 里的拼接逻辑原样跑一遍（不发请求），
+            让用户在面板里就能看到「最终发给 NovelAI 的到底是什么」。
+            这是新手最常问的问题：改了画师串，到底拼到哪了？负权重去哪了？
+            """
+            try:
+                payload = await request.json(default={}) or {}
+                prompt = str(payload.get("prompt", "") or "").strip()
+                artist = payload.get("artist")
+                negative = payload.get("negative")
+                artist = str(artist if artist is not None else self.client.default_artist or "")
+                negative = str(negative if negative is not None else self.client.default_negative or "")
+
+                artist_clean, artist_neg = split_negative_weights(artist)
+                final_negative = negative
+                if artist_neg:
+                    final_negative = f"{negative}, {artist_neg}" if negative else artist_neg
+
+                composed = False
+                body = prompt
+                if getattr(self.client, "auto_composition", True):
+                    body, composed = ensure_composition(prompt, artist_clean)
+
+                final_prompt = body.strip()
+                if artist_clean.strip():
+                    final_prompt = f"{artist_clean.strip()}, {final_prompt}" if final_prompt else artist_clean.strip()
+
+                return json_response(
+                    {
+                        "final_prompt": final_prompt,
+                        "final_negative": final_negative,
+                        "moved_negative": artist_neg,
+                        "composition_added": composed,
+                    }
+                )
+            except Exception as e:
+                logger.error("[Nai WebUI] 预览失败: %s", e, exc_info=True)
+                return error_response(f"预览失败: {e}", status_code=500)
+
+        # ---- 注册 ----------------------------------------------------------
+        # 路由必须带插件名前缀；前端 bridge 调的时候不带（bridge 会自动补）。
+        routes = (
+            (f"/{PLUGIN_NAME}/config", api_get_config, ["GET"], "NovelAI 面板：读取配置"),
+            (f"/{PLUGIN_NAME}/config/artist", api_save_artist, ["POST"], "NovelAI 面板：保存画师串"),
+            (f"/{PLUGIN_NAME}/config/negative", api_save_negative, ["POST"], "NovelAI 面板：保存负向词"),
+            (f"/{PLUGIN_NAME}/presets", api_presets, ["POST"], "NovelAI 面板：预设增删改"),
+            (f"/{PLUGIN_NAME}/preview", api_preview, ["POST"], "NovelAI 面板：预览拼接结果"),
+        )
+        try:
+            for route, handler, methods, desc in routes:
+                register(route, handler, methods, desc)
+            logger.info("[Nai WebUI] 管理面板 API 已注册（%d 个接口）", len(routes))
+        except Exception as e:
+            logger.warning("[Nai WebUI] 管理面板 API 注册失败，面板不可用，指令不受影响: %s", e)
 
     def _register_extra_commands(self) -> None:
         """把配置里的额外命令名注册成别名。
@@ -775,11 +1057,22 @@ class Nai2ApiPlugin(Star):
         「重载后可能回退」，不该让用户的 `/nai save` 报错。
         """
         try:
-            ctx = getattr(self, "context", None)
-            if ctx is None or not callable(getattr(ctx, "get_config", None)):
-                return
-
-            cfg = ctx.get_config()
+            # 踩坑记录（v1.5.0 修复）：这里原来写的是 self.context.get_config()。
+            # 那个方法返回的是 **AstrBot 全局配置**（data/cmd_config.json，装的是
+            # dashboard 密码、平台适配器这些），里面根本没有 custom_presets 这个键，
+            # 于是下面那句 `"custom_presets" not in cfg` 永远成立、永远静默 return ——
+            # 这个函数从上线起就没真正写过一次盘。表现就是「/nai save 加的预设，
+            # 重载插件后没了」。
+            #
+            # 插件自己的配置是构造函数传进来的 `config`（AstrBotConfig 对象，
+            # 绑定 data/config/astrbot_plugin_nai_plus_config.json），要用它。
+            # 保留对 context.get_config() 的兜底只是为了兼容测试里传裸 dict 的情况。
+            cfg = getattr(self, "config", None)
+            if cfg is None or not hasattr(cfg, "save_config_async") and not hasattr(cfg, "save_config"):
+                ctx = getattr(self, "context", None)
+                if ctx is None or not callable(getattr(ctx, "get_config", None)):
+                    return
+                cfg = ctx.get_config()
             if cfg is None:
                 return
 

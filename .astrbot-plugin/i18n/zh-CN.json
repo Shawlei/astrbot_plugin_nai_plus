@@ -1,0 +1,8 @@
+{
+  "pages": {
+    "nai-config": {
+      "title": "NovelAI 配置管理",
+      "description": "画师串 / 质量前缀、负向词、预设的可视化管理面板，改完立即生效"
+    }
+  }
+}

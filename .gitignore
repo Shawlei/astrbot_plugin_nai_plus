@@ -26,3 +26,9 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# 插件运行时数据 / 误提交的 AstrBot 全局配置（含 dashboard 密码哈希），不进仓库
+data/
+
+# 本地临时目录
+.tmp/
