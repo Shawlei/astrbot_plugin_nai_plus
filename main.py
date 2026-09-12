@@ -599,7 +599,7 @@ class Nai2ApiPlugin(Star):
                         },
                         "custom_presets": _custom_presets_payload(),
                         "builtin_presets": _builtin_presets_payload(),
-                        "version": "1.5.0",
+                        "version": "1.4.1",
                     }
                 )
             except Exception as e:
@@ -1057,7 +1057,7 @@ class Nai2ApiPlugin(Star):
         「重载后可能回退」，不该让用户的 `/nai save` 报错。
         """
         try:
-            # 踩坑记录（v1.5.0 修复）：这里原来写的是 self.context.get_config()。
+            # 踩坑记录（v1.4.1 修复）：这里原来写的是 self.context.get_config()。
             # 那个方法返回的是 **AstrBot 全局配置**（data/cmd_config.json，装的是
             # dashboard 密码、平台适配器这些），里面根本没有 custom_presets 这个键，
             # 于是下面那句 `"custom_presets" not in cfg` 永远成立、永远静默 return ——
