@@ -141,7 +141,7 @@
   },
   "custom_presets": {
     "description": "预设管理",
-    "hint": "在这里增删改预设，不用改文件也不用发指令，改完立即生效。点「添加条目」新增一个预设，填预设名和质量前缀/画师串即可。这里保存的预设会覆盖同名内置预设，也能被 /nai save、/nai del、/nai update 指令读写（两种方式操作同一份数据）。",
+    "hint": "在这里增删改预设，不用改文件也不用发指令，改完立即生效。点「添加条目」新增一个预设，填预设名，再填画师串 / 附带正向词 / 附带负向词（三项至少填一项）即可。这里保存的预设会覆盖同名内置预设，也能被 /nai save、/nai del、/nai update 指令和插件页面「NovelAI 配置管理」读写（几种方式操作同一份数据）。",
     "type": "template_list",
     "default": [],
     "templates": {
@@ -157,7 +157,19 @@
           },
           "artist": {
             "description": "质量前缀 / 画师串",
-            "hint": "这段会拼在提示词最前面。可以写画师串、质量词、构图词，例如 best quality, absurdres, detailed, full body。里面的负权重（-2::green::）会自动移到负面提示词",
+            "hint": "拼在提示词最前面。可以写画师串、质量词、构图词，例如 best quality, absurdres, detailed, full body。里面的负权重（-2::green::）会自动移到负面提示词。可留空（沿用全局画师串），但画师串 / 正向词 / 负向词三项至少填一项",
+            "type": "text",
+            "default": ""
+          },
+          "positive": {
+            "description": "附带正向词",
+            "hint": "用这个预设生图时，自动追加到用户提示词后面的英文标签，例如 soft lighting, night, city lights。和用户提示词重复的标签会自动跳过。可留空",
+            "type": "text",
+            "default": ""
+          },
+          "negative": {
+            "description": "附带负向词",
+            "hint": "用这个预设生图时，追加到全局负向词后面（是追加不是替换，全局的 bad hands / lowres 等兜底仍然生效）。可留空",
             "type": "text",
             "default": ""
           },

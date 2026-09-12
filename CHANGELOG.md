@@ -3,6 +3,58 @@
 > 说明：本仓库自 v1.0.0 起独立计数（原项目基于 helloWKQ/AstrBot_Nai2API 二开，
 > 早期内部迭代过 v1.2.0 / v1.3.x，为对接 AstrBot 插件市场，版本号从 1.0.0 重新开始）。
 
+## v1.4.2
+
+预设从「只有一条画师串」扩成**三段式**：画师串 + 附带正向词 + 附带负向词。起因是用户在 WebUI 里新增预设时发现只能填画师串——想让某个预设顺带压掉某些东西（比如 2.5D 风压 `green`）、或者常驻补几个构图词，以前只能硬塞进画师串里。
+
+### 新增：预设可以附带正向词 / 负向词
+
+| 段 | 拼到哪 | 说明 |
+|----|--------|------|
+| **画师串** | 整条提示词**最前面** | 和以前一样，替代全局画师串。**现在允许留空**（沿用全局画师串） |
+| **附带正向词** | 用户提示词**后面** | 每次用这个预设生图都自动带上，适合放构图、光照、场景氛围。和用户提示词重复的标签自动跳过 |
+| **附带负向词** | 全局负向词**后面** | 是**追加**不是替换：全局的 `bad hands` / `lowres` 兜底仍然生效 |
+
+三段任意一段非空即可保存。所以现在可以做「夜景」这种只加 `night, city lights` + 压 `daylight`、不动画风的预设。
+
+**为什么正向词放用户提示词后面而不是前面**：NovelAI 越靠前权重越高。画师串（风格）理应最前，用户描述的画面其次，预设的「常驻补充」放最后，这样用户写的内容不会被预设里的固定词压住。
+
+**为什么负向词是追加不是替换**：全局负向词通常是通用兜底，预设的负向词是针对某种画风的额外约束。替换会把兜底丢掉，新手容易踩坑；想彻底换的把全局那份清空就行。
+
+### 生效范围
+
+- `/nai -p 预设名 ...` 指令、LLM 工具 `nai_generate(preset=...)`：都会把预设的正向 / 负向词并进去
+- 预设正向词在**直译之后**拼入：它本来就是英文标签，不该再被直译模型改写；也在扣点确认之前拼入，确认提示里看到的就是最终内容
+- WebUI 面板：新增 / 编辑预设弹窗多了两个框；预设卡片显示三段内容 + `+正向` `+负向` 小标记；**拼接预览新增「模拟预设」下拉**，选一个预设就能看到 `/nai -p` 之后最终发出去的是什么，每张预设卡片也有「预览」按钮直达
+- 配置页 `custom_presets` 列表新增「附带正向词」「附带负向词」两栏
+- `/nai presets` 列表会标注「（附带正向词 / 负向词）」，`/nai presets 名字` 详情分段显示
+
+### 向后兼容
+
+- 旧的 `presets.json` / 配置里只有 `artist` + `desc` 的预设，读进来自动补空的 `positive` / `negative`，行为和以前**完全一样**
+- `/nai save 名字 画师串` / `/nai update` 指令不变（只操作画师串，想加正向 / 负向词去 WebUI）
+- `PresetManager.save()` / `update()` 的新参数都是关键字可选参数，老调用方式不受影响
+- 内置 5 个预设不带正向 / 负向词，`get_entry()` 统一补空串，调用方不用判断键存不存在
+
+### 边界处理
+
+- `_resolve_artist()`：预设存在但画师串为空 → 返回 `None`，让 client 退回全局画师串（以前返回空串会导致「画师串被清空」）
+- `_apply_preset_extras()`：用户没给 `--negative` 时（`negative=None`）先取全局负向词再追加，否则 client 收到非 `None` 会当成「用户完全自定义」把全局那份丢掉
+- 合并去重只做「整段完全相同（忽略大小写）」，`1.2::tag::` 和 `tag` 视为不同项——用户可能故意用不同权重
+
+### 测试
+
+- `tests/test_webui_api.py` 56 → **92 项断言**：三段式保存 / 回写 / 落盘、三段全空拒绝、`_resolve_artist` 空串退回、`_apply_preset_extras` 四种 negative 组合、预览带 preset、老格式 presets.json 兼容、`merge_tags` 边界、前端表单字段存在性
+- 词库回归 7905/7905 通过
+
+### 文件变化
+
+- `core/preset_manager.py`：新增 `_normalize_entry` / `preset_has_content` / `merge_tags` / `get_entry` / `get_positive` / `get_negative`；`save` / `update` / `export_for_webui` / `parse_webui_presets` / `_load_file` / `_merge` 支持三段
+- `main.py`：`_resolve_artist` 空串处理；新增 `_apply_preset_extras`，接入 `/nai` 指令和 `nai_generate` 工具；WebUI `presets` / `preview` 接口支持三段和 `preset` 参数；`/nai presets` 显示三段（新增 `_format_preset_detail`）
+- `_conf_schema.json`：`custom_presets` 模板新增 `positive` / `negative` 两栏
+- `pages/nai-config/{index.html,app.js,style.css}`：弹窗两个新框、卡片三段展示、预览「模拟预设」下拉
+- `tests/test_webui_api.py`：+36 项断言
+
 ## v1.4.1
 
 新增一个**独立的 WebUI 管理面板**，放在 AstrBot「插件」页 → 本插件详情页里。以前改画师串、负向词只能在配置页的小输入框里硬改，看不到最终拼出来是什么；现在有专门的页面了。

@@ -569,6 +569,56 @@ code {
   word-break: break-word;
 }
 
+/* 预设卡片里的三段内容（画师串 / 正向词 / 负向词），标签靠左小字 */
+.preset-field {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 6px;
+  margin-top: 4px;
+  align-items: start;
+}
+
+.preset-field-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+  padding-top: 2px;
+  white-space: nowrap;
+}
+
+/* 「+正向」「+负向」这类弱化标记 */
+.badge-soft {
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-weight: 500;
+}
+
+/* 拼接预览里的「模拟预设」下拉 */
+.preview-options {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.inline-label {
+  font-size: 12.5px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.select {
+  flex: 1;
+  min-width: 200px;
+  max-width: 360px;
+  cursor: pointer;
+}
+
+.field-hint-block {
+  margin: -4px 0 14px;
+}
+
 .empty-state {
   padding: 26px 16px;
   text-align: center;

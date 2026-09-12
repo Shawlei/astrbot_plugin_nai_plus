@@ -93,6 +93,12 @@
       </div>
       <div class="card-body">
         <input id="preview-prompt" class="input" type="text" placeholder="例如：1girl, silver hair, smile" />
+        <div class="preview-options">
+          <label for="preview-preset" class="inline-label">模拟预设</label>
+          <select id="preview-preset" class="input select">
+            <option value="">不用预设（用上面两个框）</option>
+          </select>
+        </div>
         <div class="actions-row">
           <button class="btn btn-primary" id="preview-btn">预览</button>
         </div>
@@ -116,7 +122,8 @@
         <div>
           <h2>预设管理</h2>
           <p class="hint">
-            预设 = 一套可以用 <code>/nai -p 预设名</code> 临时切换的画师串。
+            预设 = 一套可以用 <code>/nai -p 预设名</code> 临时切换的组合：<strong>画师串</strong>（替代全局画师串）+
+            <strong>附带正向词</strong>（追加到提示词后）+ <strong>附带负向词</strong>（追加到全局负向词后），三项任填。
             这里和 <code>/nai save / del / update</code> 指令、配置页的「预设管理」列表操作的是<strong>同一份数据</strong>。
           </p>
         </div>
@@ -154,9 +161,21 @@
           <div class="field-hint">调用时用 <code>/nai -p 这个名字</code>。不能和内置预设重名。</div>
         </div>
         <div class="form-group">
-          <label for="preset-artist">质量前缀 / 画师串 <span class="req">*</span></label>
-          <textarea id="preset-artist" class="textarea mono" rows="6" spellcheck="false" placeholder="会拼在提示词最前面，支持 NovelAI 权重语法"></textarea>
+          <label for="preset-artist">质量前缀 / 画师串</label>
+          <textarea id="preset-artist" class="textarea mono" rows="5" spellcheck="false" placeholder="拼在提示词最前面，支持 NovelAI 权重语法。留空 = 沿用全局画师串"></textarea>
+          <div class="field-hint">用这个预设生图时，会<strong>替代</strong>上面的全局画师串。</div>
         </div>
+        <div class="form-group">
+          <label for="preset-positive">附带正向词</label>
+          <textarea id="preset-positive" class="textarea mono" rows="3" spellcheck="false" placeholder="例如：soft lighting, night, city lights"></textarea>
+          <div class="field-hint">每次用这个预设生图时，<strong>追加到用户提示词后面</strong>。适合放构图、光照、场景氛围这类常驻补充。和用户提示词重复的标签会自动跳过。</div>
+        </div>
+        <div class="form-group">
+          <label for="preset-negative">附带负向词</label>
+          <textarea id="preset-negative" class="textarea mono" rows="3" spellcheck="false" placeholder="例如：-2::green::, muscular"></textarea>
+          <div class="field-hint"><strong>追加</strong>到全局负向词后面（不是替换，全局的 bad hands / lowres 等兜底仍然生效）。</div>
+        </div>
+        <div class="field-hint field-hint-block">画师串、正向词、负向词<strong>至少填一项</strong>。</div>
         <div class="form-group">
           <label for="preset-desc">备注</label>
           <input type="text" id="preset-desc" class="input" placeholder="只在列表里显示，可留空" />

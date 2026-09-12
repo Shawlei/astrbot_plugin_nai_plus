@@ -81,6 +81,7 @@ const els = {
   saveNegative: $("save-negative"),
 
   previewPrompt: $("preview-prompt"),
+  previewPreset: $("preview-preset"),
   previewBtn: $("preview-btn"),
   previewResult: $("preview-result"),
   previewFinal: $("preview-final"),
@@ -102,6 +103,8 @@ const els = {
   savePreset: $("save-preset"),
   presetName: $("preset-name"),
   presetArtist: $("preset-artist"),
+  presetPositive: $("preset-positive"),
+  presetNegative: $("preset-negative"),
   presetDesc: $("preset-desc"),
 
   toast: $("toast"),
@@ -265,15 +268,25 @@ async function runPreview() {
   }
   setBusy(els.previewBtn, true, "计算中…");
   try {
+    const presetName = els.previewPreset.value;
     const res = await bridge.apiPost("preview", {
       prompt,
       artist: els.artistInput.value,
       negative: els.negativeInput.value,
+      preset: presetName || "",
     });
     els.previewFinal.textContent = res.final_prompt || "（空）";
     els.previewNegative.textContent = res.final_negative || "（空）";
 
     const notes = [];
+    if (res.preset_applied) {
+      const p = findPreset(presetName);
+      const parts = [];
+      if (p?.artist) parts.push("画师串替代了全局画师串");
+      if (p?.positive) parts.push(`正向词 <code>${escapeHtml(truncate(p.positive, 60))}</code> 追加到了提示词后面`);
+      if (p?.negative) parts.push(`负向词 <code>${escapeHtml(truncate(p.negative, 60))}</code> 追加到了负向词后面`);
+      notes.push(`已模拟 <code>/nai -p ${escapeHtml(presetName)}</code>：${parts.join("；") || "预设为空"}。`);
+    }
     if (res.moved_negative) {
       notes.push(`画师串里的负权重 <code>${escapeHtml(res.moved_negative)}</code> 已自动挪到负向词。`);
     }
@@ -298,9 +311,61 @@ function escapeHtml(s) {
     .replaceAll('"', "&quot;");
 }
 
+function findPreset(name) {
+  return (
+    state.customPresets.find((p) => p.name === name) ||
+    state.builtinPresets.find((p) => p.name === name) ||
+    null
+  );
+}
+
+// 预览卡片里的「模拟预设」下拉框，每次预设列表变化后重建
+function renderPreviewPresetOptions() {
+  const current = els.previewPreset.value;
+  els.previewPreset.innerHTML = "";
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "不用预设（用上面两个框）";
+  els.previewPreset.appendChild(none);
+
+  const addGroup = (label, list) => {
+    if (!list.length) return;
+    const group = document.createElement("optgroup");
+    group.label = label;
+    list.forEach((p) => {
+      const opt = document.createElement("option");
+      opt.value = p.name;
+      opt.textContent = p.name;
+      group.appendChild(opt);
+    });
+    els.previewPreset.appendChild(group);
+  };
+  addGroup("自定义预设", state.customPresets);
+  addGroup("内置预设", state.builtinPresets);
+
+  // 保住用户之前选的（如果它还在）
+  if (current && findPreset(current)) els.previewPreset.value = current;
+}
+
 // ---------------------------------------------------------------------------
 // 预设
 // ---------------------------------------------------------------------------
+
+// 预设卡片里的一段内容（画师串 / 正向词 / 负向词），空的不渲染
+function createPresetField(label, value) {
+  const wrap = document.createElement("div");
+  wrap.className = "preset-field";
+  const lab = document.createElement("span");
+  lab.className = "preset-field-label";
+  lab.textContent = label;
+  wrap.appendChild(lab);
+  const val = document.createElement("div");
+  val.className = "preset-field-value mono";
+  val.textContent = truncate(value, 160);
+  val.title = value;
+  wrap.appendChild(val);
+  return wrap;
+}
 
 function createPresetCard(preset, { builtin }) {
   const card = document.createElement("div");
@@ -320,23 +385,57 @@ function createPresetCard(preset, { builtin }) {
     badge.textContent = "内置";
     nameWrap.appendChild(badge);
   }
+  // 小标记：这个预设带了哪几段，一眼看出来
+  if (preset.positive) {
+    const b = document.createElement("span");
+    b.className = "badge badge-soft";
+    b.textContent = "+正向";
+    b.title = "附带正向词";
+    nameWrap.appendChild(b);
+  }
+  if (preset.negative) {
+    const b = document.createElement("span");
+    b.className = "badge badge-soft";
+    b.textContent = "+负向";
+    b.title = "附带负向词";
+    nameWrap.appendChild(b);
+  }
   header.appendChild(nameWrap);
 
   const actions = document.createElement("div");
   actions.className = "preset-card-actions";
 
-  const useBtn = document.createElement("button");
-  useBtn.type = "button";
-  useBtn.className = "btn btn-ghost btn-xs";
-  useBtn.textContent = "设为默认画师串";
-  useBtn.title = "把这个预设的画师串填进上面的「画师串」框（需再点保存）";
-  useBtn.addEventListener("click", () => {
-    els.artistInput.value = preset.artist || "";
-    refreshArtistMeta();
-    window.scrollTo({ top: 0, behavior: "smooth" });
-    showToast(`已填入「${preset.name}」的画师串，记得点「保存画师串」`, "info");
+  if (preset.artist) {
+    const useBtn = document.createElement("button");
+    useBtn.type = "button";
+    useBtn.className = "btn btn-ghost btn-xs";
+    useBtn.textContent = "设为默认画师串";
+    useBtn.title = "把这个预设的画师串填进上面的「画师串」框（需再点保存）";
+    useBtn.addEventListener("click", () => {
+      els.artistInput.value = preset.artist || "";
+      refreshArtistMeta();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      showToast(`已填入「${preset.name}」的画师串，记得点「保存画师串」`, "info");
+    });
+    actions.appendChild(useBtn);
+  }
+
+  const previewBtn = document.createElement("button");
+  previewBtn.type = "button";
+  previewBtn.className = "btn btn-ghost btn-xs";
+  previewBtn.textContent = "预览";
+  previewBtn.title = "在上面的「拼接预览」里模拟这个预设";
+  previewBtn.addEventListener("click", () => {
+    els.previewPreset.value = preset.name;
+    els.previewPrompt.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (els.previewPrompt.value.trim()) {
+      runPreview();
+    } else {
+      els.previewPrompt.focus();
+      showToast("输入一段正向词后点「预览」", "info");
+    }
   });
-  actions.appendChild(useBtn);
+  actions.appendChild(previewBtn);
 
   if (builtin) {
     const copyBtn = document.createElement("button");
@@ -344,7 +443,10 @@ function createPresetCard(preset, { builtin }) {
     copyBtn.className = "btn btn-ghost btn-xs";
     copyBtn.textContent = "复制为新预设";
     copyBtn.addEventListener("click", () =>
-      openModal({ name: "", artist: preset.artist || "", desc: `基于 ${preset.name}` }, null)
+      openModal(
+        { name: "", artist: preset.artist || "", positive: "", negative: "", desc: `基于 ${preset.name}` },
+        null
+      )
     );
     actions.appendChild(copyBtn);
   } else {
@@ -373,11 +475,16 @@ function createPresetCard(preset, { builtin }) {
     desc.textContent = preset.desc;
     body.appendChild(desc);
   }
-  const val = document.createElement("div");
-  val.className = "preset-field-value mono";
-  val.textContent = truncate(preset.artist || "", 160);
-  val.title = preset.artist || "";
-  body.appendChild(val);
+  if (preset.artist) {
+    body.appendChild(createPresetField("画师串", preset.artist));
+  } else {
+    const none = document.createElement("div");
+    none.className = "preset-field-value muted";
+    none.textContent = "（不带画师串，沿用全局画师串）";
+    body.appendChild(none);
+  }
+  if (preset.positive) body.appendChild(createPresetField("附带正向词", preset.positive));
+  if (preset.negative) body.appendChild(createPresetField("附带负向词", preset.negative));
   card.appendChild(body);
 
   return card;
@@ -397,6 +504,7 @@ function renderPresets() {
   state.builtinPresets.forEach((p) =>
     els.builtinList.appendChild(createPresetCard(p, { builtin: true }))
   );
+  renderPreviewPresetOptions();
 }
 
 function openModal(preset, editingName) {
@@ -405,6 +513,8 @@ function openModal(preset, editingName) {
   els.presetName.value = preset?.name || "";
   els.presetName.disabled = Boolean(editingName); // 改名 = 删了重建，这里不支持
   els.presetArtist.value = preset?.artist || "";
+  els.presetPositive.value = preset?.positive || "";
+  els.presetNegative.value = preset?.negative || "";
   els.presetDesc.value = preset?.desc || "";
   els.modalError.hidden = true;
   els.modal.hidden = false;
@@ -424,12 +534,16 @@ function showModalError(msg) {
 async function submitPreset() {
   const name = els.presetName.value.trim();
   const artist = els.presetArtist.value.trim();
+  const positive = els.presetPositive.value.trim();
+  const negative = els.presetNegative.value.trim();
   const desc = els.presetDesc.value.trim();
 
   // 前端先拦一遍常见错误，省一次请求；后端还会再校验一次
   if (!name) return showModalError("预设名不能为空");
   if (/\s/.test(name)) return showModalError("预设名不能含空格（/nai -p 是靠空格切参数的）");
-  if (!artist) return showModalError("画师串 / 质量前缀不能为空");
+  if (!artist && !positive && !negative) {
+    return showModalError("画师串、正向词、负向词至少填一项");
+  }
   if (!state.editingName && state.builtinPresets.some((p) => p.name === name)) {
     return showModalError(`「${name}」是内置预设名，换一个吧`);
   }
@@ -441,7 +555,7 @@ async function submitPreset() {
   try {
     const res = await bridge.apiPost("presets", {
       action: state.editingName ? "update" : "add",
-      data: { name, artist, desc },
+      data: { name, artist, positive, negative, desc },
     });
     state.customPresets = res.custom_presets || [];
     renderPresets();

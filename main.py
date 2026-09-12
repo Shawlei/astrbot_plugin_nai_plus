@@ -43,7 +43,7 @@ from .core.nai2api_client import (
     get_generation_cost,
     resolve_model_alias,
 )
-from .core.preset_manager import PresetManager
+from .core.preset_manager import PresetManager, merge_tags
 from .core.translate_manager import TranslateManager, TranslateError
 
 # 解析用户输入中的尺寸前缀、-p/--preset、--artist 和 --negative 参数
@@ -552,16 +552,26 @@ class Nai2ApiPlugin(Star):
                 cfg.update(patch)
             return False
 
+        def _preset_payload(name: str, info: dict) -> dict[str, str]:
+            """预设条目 → 前端字段（四段齐全，前端不用判断键存不存在）。"""
+            return {
+                "name": name,
+                "artist": str(info.get("artist", "") or ""),
+                "positive": str(info.get("positive", "") or ""),
+                "negative": str(info.get("negative", "") or ""),
+                "desc": str(info.get("desc", "") or ""),
+            }
+
         def _custom_presets_payload() -> list[dict[str, str]]:
             """自定义预设列表（给前端展示用，字段和 template_list 一致）。"""
             return [
-                {"name": name, "artist": info.get("artist", ""), "desc": info.get("desc", "")}
+                _preset_payload(name, info)
                 for name, info in self.presets.list_custom().items()
             ]
 
         def _builtin_presets_payload() -> list[dict[str, str]]:
             return [
-                {"name": name, "artist": info.get("artist", ""), "desc": info.get("desc", "")}
+                _preset_payload(name, info)
                 for name, info in BUILTIN_PRESETS.items()
             ]
 
@@ -599,7 +609,7 @@ class Nai2ApiPlugin(Star):
                         },
                         "custom_presets": _custom_presets_payload(),
                         "builtin_presets": _builtin_presets_payload(),
-                        "version": "1.4.1",
+                        "version": "1.4.2",
                     }
                 )
             except Exception as e:
@@ -632,11 +642,15 @@ class Nai2ApiPlugin(Star):
                 return error_response(f"保存失败: {e}", status_code=500)
 
         async def api_presets():
-            """POST presets  {"action": "add|update|delete", "data": {"name","artist","desc"}}
+            """POST presets  {"action": "add|update|delete",
+                              "data": {"name","artist","positive","negative","desc"}}
 
             全部走 PresetManager，再用 _persist_presets_to_config() 回写配置 ——
             和 /nai save / del / update 指令走的是同一条路，保证三处（面板 / 指令 /
             配置页 template_list）看到的永远是同一份数据。
+
+            v1.4.2：预设从「只有画师串」扩成「画师串 + 正向词 + 负向词」三段，
+            三段任意一段非空即可保存（只想附带负向词、沿用全局画师串也行）。
             """
             try:
                 payload = await request.json(default={}) or {}
@@ -647,6 +661,8 @@ class Nai2ApiPlugin(Star):
 
                 name = str(data.get("name", "") or "").strip()
                 artist = str(data.get("artist", "") or "").strip()
+                positive = str(data.get("positive", "") or "").strip()
+                negative = str(data.get("negative", "") or "").strip()
                 desc = str(data.get("desc", "") or "").strip()
 
                 if action == "delete":
@@ -661,14 +677,17 @@ class Nai2ApiPlugin(Star):
                     err = _validate_preset_name(name)
                     if err:
                         return error_response(err, status_code=400)
-                    if not artist:
-                        return error_response("画师串 / 质量前缀不能为空", status_code=400)
+                    if not (artist or positive or negative):
+                        return error_response(
+                            "画师串、正向词、负向词至少填一项", status_code=400,
+                        )
                     if action == "update" and name not in self.presets.list_custom():
                         return error_response(f"预设「{name}」不存在，无法修改", status_code=404)
                     if action == "add" and name in self.presets.list_custom():
                         return error_response(f"预设「{name}」已存在，请改用编辑", status_code=409)
-                    # save() 对新增和覆盖都适用
-                    self.presets.save(name, artist, desc)
+                    # save() 对新增和覆盖都适用；面板每次提交都是完整表单，
+                    # 所以直接整体覆盖，不走 update() 的「只改传了的字段」逻辑
+                    self.presets.save(name, artist, desc, positive=positive, negative=negative)
 
                 else:
                     return error_response(f"未知操作: {action!r}", status_code=400)
@@ -680,19 +699,37 @@ class Nai2ApiPlugin(Star):
                 return error_response(f"操作失败: {e}", status_code=500)
 
         async def api_preview():
-            """POST preview  {"prompt": "...", "artist": "...", "negative": "..."}
+            """POST preview  {"prompt": "...", "artist": "...", "negative": "...", "preset": "..."}
 
             把 nai2api_client.generate() 里的拼接逻辑原样跑一遍（不发请求），
             让用户在面板里就能看到「最终发给 NovelAI 的到底是什么」。
             这是新手最常问的问题：改了画师串，到底拼到哪了？负权重去哪了？
+
+            v1.4.2：可选传 preset（预设名）。传了就模拟 `/nai -p 预设名` 的效果：
+            预设画师串覆盖 artist（预设画师串为空则沿用传入的 artist）、
+            预设正向词追加到 prompt 后、预设负向词追加到 negative 后。
             """
             try:
                 payload = await request.json(default={}) or {}
                 prompt = str(payload.get("prompt", "") or "").strip()
                 artist = payload.get("artist")
                 negative = payload.get("negative")
+                preset_name = str(payload.get("preset", "") or "").strip() or None
                 artist = str(artist if artist is not None else self.client.default_artist or "")
                 negative = str(negative if negative is not None else self.client.default_negative or "")
+
+                preset_applied = False
+                if preset_name:
+                    entry = self.presets.get_entry(preset_name)
+                    if entry is None:
+                        return error_response(f"预设「{preset_name}」不存在", status_code=404)
+                    preset_applied = True
+                    if entry["artist"]:
+                        artist = entry["artist"]
+                    if entry["positive"]:
+                        prompt = merge_tags(prompt, entry["positive"])
+                    if entry["negative"]:
+                        negative = merge_tags(negative, entry["negative"])
 
                 artist_clean, artist_neg = split_negative_weights(artist)
                 final_negative = negative
@@ -714,6 +751,7 @@ class Nai2ApiPlugin(Star):
                         "final_negative": final_negative,
                         "moved_negative": artist_neg,
                         "composition_added": composed,
+                        "preset_applied": preset_applied,
                     }
                 )
             except Exception as e:
@@ -959,14 +997,53 @@ class Nai2ApiPlugin(Star):
         return models
 
     def _resolve_artist(self, preset_name: str | None, artist: str | None) -> str | None:
-        """解析 artist：预设优先，--artist 覆盖预设"""
+        """解析 artist：预设优先，--artist 覆盖预设。
+
+        预设存在但画师串为空（v1.4.2 起允许，比如只带正向/负向词的预设）
+        → 返回 None，让 client 退回全局画师串。
+        """
         if artist is not None:
             return artist
         if preset_name is not None:
             resolved = self.presets.get(preset_name)
-            if resolved is not None:
+            if resolved is not None and resolved.strip():
                 return resolved
         return None
+
+    def _apply_preset_extras(
+        self,
+        preset_name: str | None,
+        prompt: str,
+        negative: str | None,
+    ) -> tuple[str, str | None]:
+        """把预设附带的正向词 / 负向词并进本次生图的 prompt / negative。
+
+        规则（和 preset_manager 顶部的说明一致）：
+            正向词 → 追加到用户提示词**后面**（画师串仍由 client 拼在最前）
+            负向词 → 追加到全局负向词（或用户 --negative 给的）后面
+
+        为什么放在直译**之后**调用：预设正向词是用户自己写好的英文标签，
+        不需要再过一遍词库/直译；提前拼进去反而可能被直译模型改写。
+
+        negative 为 None 时表示「用全局默认」，这时要先把全局负向词取出来
+        再追加，否则 client 收到非 None 的 negative 会当成「用户完全自定义」，
+        把全局那份丢掉。
+        """
+        if not preset_name:
+            return prompt, negative
+        entry = self.presets.get_entry(preset_name)
+        if not entry:
+            return prompt, negative
+
+        extra_pos = entry.get("positive", "")
+        extra_neg = entry.get("negative", "")
+
+        if extra_pos:
+            prompt = merge_tags(prompt, extra_pos)
+        if extra_neg:
+            base_neg = negative if negative is not None else (self.client.default_negative or "")
+            negative = merge_tags(base_neg, extra_neg)
+        return prompt, negative
 
     def _forward_result(self, event: AstrMessageEvent, title: str, content: str):
         """将查询结果以合并转发消息形式发送，不占用聊天空间"""
@@ -1351,6 +1428,10 @@ class Nai2ApiPlugin(Star):
             return event.plain_result(trans_err or "直译失败")
         prompt = translated
 
+        # 预设附带的正向词 / 负向词（v1.4.2）。放在直译之后：预设里是现成英文标签，
+        # 不该再被直译模型改写；放在扣点确认之前：确认提示里显示的是最终内容。
+        prompt, negative = self._apply_preset_extras(preset_name, prompt, negative)
+
         # 图生图走的是另一个渠道，扣点规则和 Nai2API 无关，不做点数确认
         need_confirm = None if is_img2img else self._resolve_confirm(size, model)
         if need_confirm:
@@ -1580,16 +1661,14 @@ class Nai2ApiPlugin(Star):
             if preset_name in all_presets:
                 info = all_presets[preset_name]
                 builtin_tag = " [内置]" if self.presets.is_builtin(preset_name) else ""
-                desc = info.get("desc", "")
-                artist_val = info.get("artist", "")
                 return self._forward_result(
                     event,
                     f"预设 '{preset_name}'{builtin_tag}",
-                    f"描述: {desc}\n质量前缀:\n{artist_val}"
+                    self._format_preset_detail(info),
                 )
             else:
                 return event.plain_result(f"预设 '{preset_name}' 不存在，使用 /nai presets 查看可用预设")
-        
+
         if not all_presets:
             return event.plain_result("暂无预设")
 
@@ -1599,12 +1678,32 @@ class Nai2ApiPlugin(Star):
             desc = info.get("desc", "")
             artist_val = info.get("artist", "")
             lines.append(f"{name}{builtin_tag} - {desc}")
-            lines.append(f"  {artist_val[:80]}{'...' if len(artist_val) > 80 else ''}")
+            if artist_val:
+                lines.append(f"  {artist_val[:80]}{'...' if len(artist_val) > 80 else ''}")
+            extras = []
+            if info.get("positive"):
+                extras.append("正向词")
+            if info.get("negative"):
+                extras.append("负向词")
+            if extras:
+                lines.append(f"  （附带{' / '.join(extras)}）")
             lines.append("")
 
         lines.append("使用: /nai -p <预设名> <提示词>")
         lines.append("查看单个预设详情: /nai presets <预设名>")
         return self._forward_result(event, "可用预设列表", "\n".join(lines))
+
+    @staticmethod
+    def _format_preset_detail(info: dict) -> str:
+        """预设详情文案：画师串 / 正向词 / 负向词 三段，空的一段就不显示。"""
+        lines = [f"描述: {info.get('desc', '')}"]
+        artist_val = info.get("artist", "")
+        lines.append(f"质量前缀 / 画师串:\n{artist_val if artist_val else '（空，沿用全局画师串）'}")
+        if info.get("positive"):
+            lines.append(f"附带正向词:\n{info['positive']}")
+        if info.get("negative"):
+            lines.append(f"附带负向词:\n{info['negative']}")
+        return "\n".join(lines)
 
     def _handle_save_preset(self, event: AstrMessageEvent, args: str):
         """保存自定义预设"""
@@ -1782,6 +1881,11 @@ class Nai2ApiPlugin(Star):
             artist.strip() or None,
         )
 
+        # 预设附带的正向词 / 负向词（v1.4.2），和 /nai 指令路径保持一致
+        prompt_en, final_negative = self._apply_preset_extras(
+            preset.strip() or None, prompt_en, negative.strip() or None,
+        )
+
         try:
             seed_int = 0
             if seed and seed.strip():
@@ -1796,7 +1900,7 @@ class Nai2ApiPlugin(Star):
                 prompt_en,
                 size=size.strip() or None,
                 artist=final_artist,
-                negative=negative.strip() or None,
+                negative=final_negative,
                 seed=final_seed,
                 model=final_model,
                 ref_image_path=ref_image_path,
@@ -1892,9 +1996,7 @@ class Nai2ApiPlugin(Star):
         if preset_name in all_presets:
             info = all_presets[preset_name]
             builtin_tag = " [内置]" if self.presets.is_builtin(preset_name) else ""
-            desc = info.get("desc", "")
-            artist_val = info.get("artist", "")
-            result_text = f"描述: {desc}\n质量前缀:\n{artist_val}"
+            result_text = self._format_preset_detail(info)
             await event.send(self._forward_result(event, f"预设 '{preset_name}'{builtin_tag}", result_text))
             return mcp.types.CallToolResult(
                 content=[mcp.types.TextContent(type="text", text=result_text)]

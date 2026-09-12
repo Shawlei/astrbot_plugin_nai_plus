@@ -361,6 +361,119 @@ check(r.status_code == 404, "重复删除应 404")
 check(not ctx.global_cfg.polluted, "❌ 预设操作污染了全局配置")
 
 # ---------------------------------------------------------------------------
+# 7b. 三段式预设（v1.4.2）：画师串 / 正向词 / 负向词
+# ---------------------------------------------------------------------------
+# 只带正向词 + 负向词、不带画师串的预设也能保存
+r = call("POST", "presets", {"action": "add", "data": {
+    "name": "夜景", "artist": "", "positive": "night, city lights, full body", "negative": "daylight, sun", "desc": "夜景补充",
+}})
+check(r.status_code == 200, f"只带正向/负向词的预设应能保存: {r.body}")
+entry = plugin.presets.get_entry("夜景")
+check(entry is not None and entry["artist"] == "" and entry["positive"] == "night, city lights, full body"
+      and entry["negative"] == "daylight, sun", f"get_entry 三段内容不对: {entry}")
+check(plugin.presets.get("夜景") == "", "画师串为空的预设 get() 应返回空串而不是 None")
+# 前端拿到的列表要带 positive/negative 字段
+p_night = next((p for p in r.body["custom_presets"] if p["name"] == "夜景"), None)
+check(p_night is not None and p_night.get("positive") == "night, city lights, full body"
+      and p_night.get("negative") == "daylight, sun", f"custom_presets 缺 positive/negative: {p_night}")
+# 内置预设也要有这两个键（前端不用判断键存不存在）
+r = call("GET", "config")
+check(all("positive" in p and "negative" in p for p in r.body["builtin_presets"]), "内置预设 payload 应带 positive/negative 空串")
+# 回写到插件配置 custom_presets 里也要带三段
+saved_night = next((p for p in plugin_cfg.get("custom_presets", []) if p.get("name") == "夜景"), None)
+check(saved_night is not None and saved_night.get("positive") == "night, city lights, full body"
+      and saved_night.get("negative") == "daylight, sun", f"custom_presets 回写缺 positive/negative: {saved_night}")
+# presets.json 落盘也要带三段
+disk = json.loads((data_dir / "presets.json").read_text(encoding="utf-8"))
+check(disk.get("夜景", {}).get("negative") == "daylight, sun", "presets.json 里缺 negative")
+
+# 三段全空 → 400
+r = call("POST", "presets", {"action": "add", "data": {"name": "全空", "artist": "", "positive": "", "negative": ""}})
+check(r.status_code == 400, "三段全空应 400")
+
+# update 只改负向词，正向词保留（面板整表提交，所以这里模拟整表）
+r = call("POST", "presets", {"action": "update", "data": {
+    "name": "夜景", "artist": "", "positive": "night, city lights, full body", "negative": "daylight", "desc": "夜景补充",
+}})
+check(r.status_code == 200 and plugin.presets.get_entry("夜景")["negative"] == "daylight", "更新负向词失败")
+
+# --- 生图路径：_resolve_artist / _apply_preset_extras ---
+# 画师串为空的预设 → _resolve_artist 返回 None（退回全局画师串）
+check(plugin._resolve_artist("夜景", None) is None, "画师串为空的预设应让 _resolve_artist 返回 None")
+# 带画师串的预设仍然正常
+call("POST", "presets", {"action": "add", "data": {"name": "带串", "artist": "artist:qux", "positive": "soft lighting", "negative": "-2::green::"}})
+check(plugin._resolve_artist("带串", None) == "artist:qux", "带画师串的预设 _resolve_artist 应返回画师串")
+check(plugin._resolve_artist("带串", "artist:override") == "artist:override", "--artist 应覆盖预设画师串")
+
+# 正向词追加到用户提示词后面；重复标签跳过
+p, n = plugin._apply_preset_extras("夜景", "1girl, full body", None)
+check(p == "1girl, full body, night, city lights", f"预设正向词应追加到后面且去重: {p!r}")
+# negative=None 时要先拿全局负向词再追加，不能把全局的丢了
+plugin.client.default_negative = "lowres, bad hands"
+p, n = plugin._apply_preset_extras("夜景", "1girl", None)
+check(n == "lowres, bad hands, daylight", f"预设负向词应追加到全局负向词后面: {n!r}")
+# 用户 --negative 给了值时，追加到用户的后面
+p, n = plugin._apply_preset_extras("夜景", "1girl", "custom neg")
+check(n == "custom neg, daylight", f"预设负向词应追加到用户 --negative 后面: {n!r}")
+# 不存在的预设 / 不传预设：原样返回
+p, n = plugin._apply_preset_extras("不存在", "1girl", None)
+check(p == "1girl" and n is None, "不存在的预设不应改动 prompt/negative")
+p, n = plugin._apply_preset_extras(None, "1girl", "x")
+check(p == "1girl" and n == "x", "不传预设不应改动 prompt/negative")
+# 内置预设没有 positive/negative，也不应报错
+p, n = plugin._apply_preset_extras("动漫风", "1girl", None)
+check(p == "1girl" and n is None, "内置预设无附带词，应原样返回")
+
+# --- 预览接口支持 preset ---
+r = call("POST", "preview", {"prompt": "1girl", "artist": "artist:global", "negative": "lowres", "preset": "带串"})
+check(r.status_code == 200 and r.body.get("preset_applied") is True, f"预览带 preset 失败: {r.body}")
+check(r.body["final_prompt"].startswith("artist:qux") and "soft lighting" in r.body["final_prompt"]
+      and "artist:global" not in r.body["final_prompt"], f"预览应用预设画师串+正向词: {r.body['final_prompt']}")
+check("-2::green::" in r.body["final_negative"] and r.body["final_negative"].startswith("lowres"),
+      f"预设负向词里的负权重应进 final_negative: {r.body['final_negative']}")
+# 画师串为空的预设 → 沿用传入的 artist
+r = call("POST", "preview", {"prompt": "1girl", "artist": "artist:global", "negative": "", "preset": "夜景"})
+check(r.body["final_prompt"].startswith("artist:global") and "city lights" in r.body["final_prompt"],
+      f"画师串为空的预设预览应沿用全局画师串: {r.body['final_prompt']}")
+check(r.body["final_negative"] == "daylight", f"全局负向词为空时 final_negative 应只有预设负向词: {r.body['final_negative']}")
+r = call("POST", "preview", {"prompt": "1girl", "preset": "不存在"})
+check(r.status_code == 404, "预览不存在的预设应 404")
+# 不传 preset 行为不变
+r = call("POST", "preview", {"prompt": "1girl, cowboy shot", "artist": "", "negative": ""})
+check(r.body.get("preset_applied") is False and r.body["final_prompt"] == "1girl, cowboy shot", "不传 preset 应和以前一致")
+
+# --- 老格式兼容：只有 artist/desc 的 presets.json 读进来不炸，且补齐三段 ---
+from astrbot_plugin_nai_plus.core.preset_manager import PresetManager, merge_tags, parse_webui_presets  # noqa: E402
+
+legacy_dir = tmp / "legacy"
+legacy_dir.mkdir()
+(legacy_dir / "presets.json").write_text(json.dumps({"旧预设": {"artist": "artist:old", "desc": "老的"}}, ensure_ascii=False), encoding="utf-8")
+pm = PresetManager(legacy_dir, webui_presets=[{"name": "配置里的", "artist": "artist:cfg"}])
+e_old = pm.get_entry("旧预设")
+check(e_old == {"artist": "artist:old", "positive": "", "negative": "", "desc": "老的"}, f"老格式预设应补齐三段: {e_old}")
+e_cfg = pm.get_entry("配置里的")
+check(e_cfg is not None and e_cfg["positive"] == "" and e_cfg["negative"] == "", "老格式 template_list 项应补齐三段")
+# export_for_webui 带三段
+exported = pm.export_for_webui()
+check(all({"artist", "positive", "negative", "desc"} <= set(x) for x in exported), "export_for_webui 应带三段")
+# parse_webui_presets：三段全空的丢弃、只有负向词的保留
+parsed = parse_webui_presets([
+    {"name": "全空", "artist": "", "positive": "", "negative": ""},
+    {"name": "只负向", "negative": "blurry"},
+])
+check("全空" not in parsed and parsed.get("只负向", {}).get("negative") == "blurry", f"parse_webui_presets 三段规则不对: {parsed}")
+# merge_tags 边界
+check(merge_tags("", "a, b") == "a, b" and merge_tags("a", "") == "a", "merge_tags 空值处理")
+check(merge_tags("a, B", "b, c") == "a, B, c", f"merge_tags 应忽略大小写去重: {merge_tags('a, B', 'b, c')!r}")
+check(merge_tags("1.2::tag::", "tag") == "1.2::tag::, tag", "merge_tags 不应把带权重的和不带权重的视为同一项")
+
+# 清理本节新增的预设，避免影响后面
+call("POST", "presets", {"action": "delete", "data": {"name": "夜景"}})
+call("POST", "presets", {"action": "delete", "data": {"name": "带串"}})
+plugin.client.default_negative = plugin_cfg.get("default_negative", "")
+check(not ctx.global_cfg.polluted, "❌ 三段式预设操作污染了全局配置")
+
+# ---------------------------------------------------------------------------
 # 8. 预览：和 nai2api_client.generate() 的拼接语义一致
 # ---------------------------------------------------------------------------
 r = call("POST", "preview", {"prompt": "1girl, silver hair", "artist": "artist:foo, -2::green::, year 2025", "negative": "lowres"})
@@ -400,6 +513,10 @@ check('type="module"' in html and "app.js" in html, "index.html 应以 module �
 for ep in ("config", "config/artist", "config/negative", "presets", "preview"):
     check(f'"{ep}"' in js, f"app.js 里没调用 endpoint {ep!r}")
 check('apiGet("/' not in js and 'apiPost("/' not in js, "bridge endpoint 不应以 / 开头")
+# 三段式预设：前端表单要有正向词 / 负向词输入框，提交时要带上
+check('id="preset-positive"' in html and 'id="preset-negative"' in html, "index.html 缺预设正向词 / 负向词输入框")
+check('id="preview-preset"' in html, "index.html 缺拼接预览的「模拟预设」下拉框")
+check("positive" in js and "negative" in js and "preset:" in js, "app.js 应提交 positive/negative 并在预览里传 preset")
 i18n = json.loads((ROOT / ".astrbot-plugin" / "i18n" / "zh-CN.json").read_text(encoding="utf-8"))
 check(i18n.get("pages", {}).get("nai-config", {}).get("title"), "zh-CN.json 缺 pages.nai-config.title")
 
