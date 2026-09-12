@@ -143,6 +143,108 @@ def load_builtin_dict() -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# 角色标签集合（v1.4.4）
+# ---------------------------------------------------------------------------
+
+# 只有 characters.json 里的值才算「角色」。三个 json 合并进 entries 后来源就丢了，
+# 所以这里单独再读一次 characters.json。
+_CHARACTER_DICT_FILE = "characters.json"
+
+
+def _normalize_tag_key(tag: str) -> str:
+    """小写 + 下划线视为空格 + 空格收敛。和 translate_manager 里的同名函数
+    保持一致（两边都要能对上同一个 key，故意不互相 import 以免循环依赖）。"""
+    return re.sub(r"\s+", " ", (tag or "").strip().lower().replace("_", " "))
+
+
+def _is_series_tag(en: str, norm: str, paren_series: set[str]) -> bool:
+    """判断 characters.json 里的一条**值**是不是「作品名」而非「角色名」。
+
+    为什么要区分：characters.json 每个分组开头都放了作品名本身（`原神` →
+    `genshin impact`、`鸣潮` → `wuthering_waves`），它们和角色名混在一起。
+    `_ensure_subject_count` 要靠这个集合数「画里有几个角色」，作品名混进去
+    会把 `原神 神里绫华` 数成 2 个角色，导致该补 solo 时不补。
+
+    三条判据（任一命中即是作品名）：
+        1. 值本身以 `(series)` 结尾：`fate_(series)`、`nier (series)`
+        2. 值（归一化后）出现在其他值的消歧括号里：`wuthering waves` 出现在
+           `denia_(wuthering_waves)` 的括号里 → 它是作品名。这条能自动覆盖
+           词库里大部分作品名，以后加新分组不用改代码
+        3. 显式列表 `_EXTRA_SERIES_TAGS`：没有任何角色用它做消歧后缀的作品名
+           （`genshin impact` 的角色标签都是裸名 `kamisato ayaka`，不带括号）
+    """
+    if norm.endswith("(series)"):
+        return True
+    if norm in paren_series:
+        return True
+    if norm in _EXTRA_SERIES_TAGS:
+        return True
+    return False
+
+
+# 没法从括号自动派生、只能手写的作品名 / 非角色词条。
+# 判断依据：该分组的角色标签都是裸名（不带作品消歧括号），或者这条根本不是人。
+# 加分组时如果角色都是裸名，记得把作品名补到这里 —— 否则 `原神 XX` 会被数成
+# 两个角色。测试 `test_prompt_dict_quality.py` 会检查 `genshin impact` 不在集合里。
+_EXTRA_SERIES_TAGS: frozenset[str] = frozenset({
+    # 作品名（分组首条）
+    "genshin impact", "zenless zone zero", "fate/grand order", "honkai impact 3rd",
+    "bocchi the rock!", "hololive", "nijisanji", "virtual youtuber", "vshojo",
+    "punishing:gray raven", "gensokyo", "luofu",
+    # anime_classic 分组里的作品名（角色多为裸名）
+    "sousou no frieren", "mahou shoujo madoka magica", "k-on!", "shingeki no kyojin",
+    "kimetsu no yaiba", "jujutsu kaisen", "chainsaw man", "spy x family",
+    "violet evergarden", "kimi no na wa", "tenki no ko", "detective conan",
+    "bishoujo senshi sailor moon", "neon genesis evangelion", "code geass",
+    "steins;gate", "toaru kagaku no railgun", "sword art online",
+    "re:zero kara hajimeru isekai seikatsu", "kono subarashii sekai ni shukufuku wo!",
+    "hyouka", "yahari ore no seishun love comedy wa machigatteiru",
+    "seishun buta yarou wa bunny girl senpai no yume wo minai",
+    "saenai heroine no sodatekata", "mahou shoujo lyrical nanoha",
+    "toaru majutsu no index", "mahou shoujo", "date a live", "strike witches",
+    "lucky star", "chuunibyou demo koi ga shitai!", "dantalian no shoka",
+    "kuroshitsuji", "tokyo ghoul", "one punch man", "gintama", "d.gray-man",
+    "kuroko no basket", "tennis no oujisama", "slam dunk", "one piece", "bleach",
+    "dragon ball", "dragon ball z", "dragon ball super", "marvel (comics)",
+    # game_others
+    "nier:automata", "final fantasy", "overwatch",
+    # 非角色的杂项（种族 / 道具 / 效果 / 画风）—— 它们出现在 characters.json
+    # 只是因为归到了作品分组下，但不是「一个人」
+    "ajin", "saiyan", "super saiyan", "martial arts uniform", "kamehameha",
+    "aura", "golden aura", "power level", "manhwa", "anime", "comic",
+})
+
+
+def load_character_tags() -> set[str]:
+    """从 characters.json 提取「角色标签」集合（归一化后的值），排除作品名。
+
+    只读内置词库，不含用户自定义词库 —— 用户词库没有分文件的来源信息，
+    分不清哪条是角色哪条是场景，全塞进来会污染判定。
+    """
+    path = _BUILTIN_DICT_DIR / _CHARACTER_DICT_FILE
+    if not path.is_file():
+        return set()
+
+    values = [en for en in load_dict_file(path).values() if isinstance(en, str) and en.strip()]
+    if not values:
+        return set()
+
+    # 先扫一遍所有括号内容，收集「被拿来做消歧后缀的作品名」
+    paren_series: set[str] = set()
+    for en in values:
+        for m in re.finditer(r"[\(\[]([^\)\]]+)[\)\]]", en):
+            paren_series.add(_normalize_tag_key(m.group(1)))
+
+    out: set[str] = set()
+    for en in values:
+        norm = _normalize_tag_key(en)
+        if not norm or _is_series_tag(en, norm, paren_series):
+            continue
+        out.add(norm)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # 切分
 # ---------------------------------------------------------------------------
 
@@ -297,6 +399,15 @@ class PromptDictionary:
         self.user = self._load_user_dict(user_path)
         self.entries: dict[str, str] = {**self.builtin, **self.user}
 
+        # 角色标签集合（v1.4.4）：给 translate_manager 的「单角色自动补 solo」用。
+        # 只来自内置 characters.json，已剔除作品名；用户词库不进这个集合。
+        # 读失败就是空集合，兜底逻辑会退化成只靠括号写法判断，不会炸。
+        try:
+            self.character_tags: set[str] = load_character_tags()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[PromptDict] 角色标签集合加载失败，补 solo 只靠括号写法: %s", e)
+            self.character_tags = set()
+
         # 纯英文键的大小写不敏感索引。词库里 `HK416`/`MEIKO` 是大写、`saber`
         # 是小写，用户怎么打都该命中。只给不含中文的键建这张表 —— 中文键没有
         # 大小写问题，全建一遍白占内存。有原样键优先，索引只做兜底。
@@ -415,6 +526,26 @@ class PromptDictionary:
 # 这里只需要处理「替换后出现连续逗号」这类脏格式
 _MULTI_COMMA_RE = re.compile(r"\s*,\s*(?:,\s*)+")
 
+# 连接词 / 虚词（v1.4.4）。
+#
+# 为什么需要：用户写整句时天然会带「穿着」「在」「的」这类词，它们对出图
+# **没有任何视觉含义**，但词库里不可能收录它们（`穿着` → ? 没有对应标签）。
+# 结果就是「原神神里绫华穿着泳衣在沙滩玩耍」这句：原神 / 神里绫华 / 泳衣 /
+# 沙滩 / 玩耍 全在词库里，却因为夹着 `穿着` 和 `在` 两个虚词导致子串兜底
+# 「有中文残留 → 整段放弃」，整句白白交给模型（模型还把 1girl 弄丢了）。
+#
+# 只列这一小批**纯功能词**，多字优先匹配（`穿着` 先于 `穿`、`着`），
+# 绝不放形容词 / 名词进来 —— 这个列表的每一个词都必须满足
+# 「删掉它画面不会有任何变化」。
+_CONNECTIVE_RE = re.compile(
+    r"穿着|戴着|拿着|抱着|正在|一个|一位|一名|穿|戴|在|的|和|与|着|了"
+)
+
+
+def _strip_connectives(text: str) -> str:
+    """删掉连接词。只在子串兜底的残留判定里用，不改动正常命中的路径。"""
+    return _CONNECTIVE_RE.sub("", text or "")
+
 
 def _tidy(tags: str) -> str:
     """清理标签串里的脏格式：连续逗号、首尾逗号、多余空格"""
@@ -503,10 +634,26 @@ def apply_dictionary(
             #
             # 所以这里的判据是：替换完还有中文残留 → 整个片段放弃兜底，
             # 原样交给模型处理。
+            #
+            # v1.4.4 放宽一档：残留如果**全部是连接词**（穿着 / 在 / 的 …），
+            # 删掉之后不再有任何中文 → 也接受为命中。理由：这些词对画面
+            # 没有任何贡献，删掉它们不会产生「用户没写过的内容」，也就不会
+            # 触发上面说的 prompt 污染。
+            #
+            # 但判据必须严格到「删完连接词后一个汉字都不剩」：只要还剩一个
+            # 非连接词的汉字（`超级赛`、`发型`），仍然整段放弃 —— 因为那个
+            # 汉字说明这段里有我们**没理解**的内容，而半截命中比不命中危险。
+            # `超级赛亚人发型` 的反例仍然成立：`亚人` → ajin 命中，但残留
+            # `超级赛` / `发型` 不是连接词，照旧放弃进 misses。
             sub, n_sub = dictionary.replace_substring(seg)
             if n_sub and not has_cjk(sub):
                 hits.append(seg)
                 out_parts.append(_tidy(sub))
+            elif n_sub and not has_cjk(_strip_connectives(sub)):
+                # 残留全是连接词：剥掉后接受。注意剥的是 sub（替换后的串），
+                # 这样英文标签之间的分隔逗号仍然保留，_tidy 负责收敛。
+                hits.append(seg)
+                out_parts.append(_tidy(_strip_connectives(sub)))
             else:
                 # 未命中的部分**不能**留在 merged 里。
                 #

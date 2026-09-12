@@ -40,6 +40,23 @@ from .prompt_dict import (
 #   - 权重语法（极易被模型「顺手规范化」掉）
 #   - 已英文输入（模型容易自作主张重写）
 #   - 抽象氛围（考的是从描述里提取标签的能力）
+#
+# ⚠️ v1.4.4 修改记录（别改回去）：
+#   第 7 条原先是 "start with `1girl` or `1boy` **when applicable**"，太软。
+#   线上日志实证：`#nai 原神神里绫华穿着泳衣在沙滩玩耍` 被翻成
+#   `kamisato_ayaka_(genshin_impact), swimsuit, beach, playing` —— 人数标签整个没了。
+#   人数标签是 NovelAI 最重要的主体标签（没有它模型会自己猜是一人还是多人，
+#   画面主体经常跑偏），所以改成 MUST 硬约束并明确要求「放最前面」。
+#
+#   同时示例里有两处自相矛盾必须一并修掉，否则规则和示例打架、模型听示例的：
+#     a) `战双 比安卡 泳装` / `鸣潮 达妮娅 泳装` 的 Output 自己就没带 1girl —— 补上
+#     b) 赛博朋克城市示例的 Output 里有个 `1girl`，可输入压根没提人 —— 删掉
+#        （它直接违反第 11 条「不许脑补」）
+#   `原神 雷电将军...` 示例里的 1girl 也从末尾挪到了最前，和新规则保持一致。
+#
+# ⚠️ 这份文本和 `_conf_schema.json` 里 `translate_system_prompt.default` 的默认值
+#    必须**逐字节一致**：用户没改过配置时读取的是 schema 那份，只改这里等于没改。
+#    改完请跑 `tests/test_webui_api.py`（第 11 节有 schema 一致性断言）校验。
 SYSTEM_PROMPT = (
     "You are a prompt translator for NovelAI image generation.\n"
     "Translate the user's description into English Danbooru-style tags.\n\n"
@@ -54,7 +71,10 @@ SYSTEM_PROMPT = (
     "`1.2::tag::`, `{{tag}}`, `[tag]`, `-2::tag::`, `\\n20::tag::`.\n"
     "5. Preserve artist tags such as `artist:name`, `dino_(dinoartforame)` unchanged.\n"
     "6. Keep the original tag order as much as possible; quality tags stay where they are.\n"
-    "7. For a single character, start with `1girl` or `1boy` when applicable.\n"
+    "7. SUBJECT COUNT IS MANDATORY. If the picture has a single person (the user named "
+    "one character, or described one person), the output MUST include `1girl` or `1boy` "
+    "as the FIRST tag (use `solo` if the gender is unknown). Only omit it when the user "
+    "explicitly asks for multiple people or a scene with no people at all.\n"
     "8. Never output Chinese characters in the result.\n"
     "9. If the user asks for a size or other non-visual instruction, ignore it.\n"
     "10. Convert Chinese counters and quantifiers into tags: 双马尾 → twintails, "
@@ -72,22 +92,22 @@ SYSTEM_PROMPT = (
     "Input: 白发少女站在樱花树下，回头微笑\n"
     "Output: 1girl, white hair, standing, cherry blossoms, tree, looking back, smile\n\n"
     "Input: 原神 雷电将军 紫色长发 和服\n"
-    "Output: raiden shogun, purple hair, long hair, japanese clothes, 1girl\n\n"
+    "Output: 1girl, raiden shogun, purple hair, long hair, japanese clothes\n\n"
     "Input: {{1girl}} 1.3::silver hair:: [detailed]\n"
     "Output: {{1girl}}, 1.3::silver hair::, [detailed]\n\n"
     "Input: 1girl, silver hair, looking at viewer\n"
     "Output: 1girl, silver hair, looking at viewer\n\n"
     "Input: 赛博朋克风格的城市夜景，霓虹灯，雨，氛围感\n"
     "Output: cyberpunk, city, night, neon lights, rain, cinematic lighting, "
-    "depth of field, 1girl\n\n"
+    "depth of field\n\n"
     "Input: 一个女孩抱着猫坐在床上，猫是橘色的\n"
     "Output: 1girl, holding cat, cat, orange cat, sitting, on bed, indoors\n\n"
     "Input: 战双 比安卡 泳装\n"
-    "Output: bianca_(punishing:_gray_raven), swimsuit\n\n"
+    "Output: 1girl, bianca_(punishing:_gray_raven), swimsuit\n\n"
     "Input: 动漫风 熟女 泳装\n"
     "Output: 1girl, mature female, swimsuit, anime style\n\n"
     "Input: 鸣潮 达妮娅 泳装\n"
-    "Output: dania_(wuthering_waves), swimsuit\n\n"
+    "Output: 1girl, dania_(wuthering_waves), swimsuit\n\n"
     "Output the translated tags in a single line and nothing else."
 )
 
@@ -223,6 +243,170 @@ _QUALITY_TAGS: frozenset[str] = frozenset({
 _QUALITY_WEIGHT = "1.2"
 
 
+# ---------------------------------------------------------------------------
+# 人数标签兜底（v1.4.4 新增）
+# ---------------------------------------------------------------------------
+
+# 已经表达了「画面里有几个人」的标签。只要结果里出现任意一个，就不再补 solo。
+# 为什么要把 2girls 这类也列进去：模型按第 7 条规则输出后，如果用户明确要了
+# 多人，我们不希望再插一个自相矛盾的 solo。
+_SUBJECT_COUNT_TAGS: frozenset[str] = frozenset({
+    "1girl", "2girls", "3girls", "4girls", "5girls", "6+girls", "multiple girls",
+    "1boy", "2boys", "3boys", "4boys", "5boys", "6+boys", "multiple boys",
+    "1other", "2others", "multiple others",
+    "solo", "solo focus",
+    "no humans",
+})
+
+# 形如 `xxx_(yyy)` / `xxx (yyy)` 的消歧写法里，括号里是作品名的情况：
+# `fate_(series)` 这种是**作品**标签，不能算作「画里有一个人」。
+# 另外 `(character)` 也排除 —— 它是 Danbooru 用来区分「角色 vs 同名作品」的
+# 标记（如 `inuyasha_(character)`），不代表有几个人。
+_GENERIC_PAREN_SUFFIXES: frozenset[str] = frozenset({"series", "character"})
+
+# 拆权重/括号语法用的正则：`20::`、`1.2::` 这类前缀
+_WEIGHT_PREFIX_RE = re.compile(r"^[\d.]+\s*::\s*")
+
+
+def _strip_tag_syntax(tag: str) -> str:
+    """把一个标签剥成「裸标签」，用于判断它到底是不是人数标签 / 角色标签。
+
+    NovelAI 的几个权重写法都要能剥掉，否则 `{{1girl}}` 会被当成一个陌生的
+    标签，兜底逻辑就会误判成「结果里没有人数标签」而再插一个 solo：
+        `{{1girl}}`        → `1girl`
+        `[detailed]`       → `detailed`
+        `1.2::1girl::`     → `1girl`
+        `\\n20::1girl`      → `1girl`
+    """
+    t = (tag or "").strip()
+    if not t:
+        return ""
+
+    # 权重语法：`1.2::tag::` / `\n20::tag::` → 取中间那段
+    if "::" in t:
+        parts = [p for p in t.split("::") if p.strip()]
+        if len(parts) >= 2:
+            t = parts[1].strip()
+
+    t = _WEIGHT_PREFIX_RE.sub("", t).strip()
+
+    # 剥掉任意层数的 {} / [] 包裹（`{{tag}}` 会剥两轮）
+    prev = None
+    while prev != t:
+        prev = t
+        if len(t) >= 2 and (
+            (t.startswith("{{") and t.endswith("}}"))
+            or (t.startswith("[[") and t.endswith("]]"))
+        ):
+            t = t[1:-1].strip()
+        elif len(t) >= 2 and t[0] in "[{" and t[-1] in "]}":
+            t = t[1:-1].strip()
+
+    return t.strip()
+
+
+def _normalize_tag_key(tag: str) -> str:
+    """标签归一化：小写 + 下划线视为空格 + 空格收敛。
+
+    为什么下划线和空格要等价：词库里 `amiya_(arknights)`（Danbooru 原生写法）
+    和 `arona (blue archive)`（NovelAI 推荐写法）并存，两种写法指的是同一个
+    标签。判定角色时不做归一化就会漏判。
+    """
+    return re.sub(r"\s+", " ", (tag or "").strip().lower().replace("_", " "))
+
+
+def _looks_like_character_tag(tag: str) -> bool:
+    """靠「消歧括号」猜一个标签是不是角色。
+
+    词库里没覆盖的角色（用户自己写的、模型猜的）只能靠写法判断：Danbooru 的
+    角色标签在重名时会带作品名括号（`bianca_(pgr)`、`dino_(dinoartforame)`）。
+
+    注意排除两类，它们虽然有括号但不是角色：
+        - `fate_(series)` / `inuyasha_(character)` —— 括号里是 series/character
+          这类通用后缀，不是作品名
+        - `artist:xxx_(yyy)` —— 画师标签
+    """
+    t = _normalize_tag_key(_strip_tag_syntax(tag))
+    if not t or t.startswith("artist:"):
+        return False
+
+    m = re.search(r"[\(\[]([^\)\]]*)[\)\]]", t)
+    if not m:
+        return False
+
+    inner = m.group(1).strip()
+    # `(series)` / `(character)` 这类通用后缀不算作品名，也就不算角色
+    if inner in _GENERIC_PAREN_SUFFIXES:
+        return False
+    return bool(inner)
+
+
+def _ensure_subject_count(tags: str, character_tags: set[str] | None) -> str:
+    """兜底补一个人数标签。
+
+    为什么需要这个兜底（v1.4.4）：
+        人数标签是 NovelAI 最重要的主体标签。没有它，模型得自己猜画面里是
+        一个人还是几个人，主体经常跑偏。而翻译模型经常把 `1girl` 忘掉 ——
+        线上实证：`原神神里绫华穿着泳衣在沙滩玩耍` 被翻成
+        `kamisato_ayaka_(genshin_impact), swimsuit, beach, playing`，
+        人数标签整个消失了。提示词层面已经改成硬约束（第 7 条），
+        但模型不听话是常态，所以代码层再兜一道。
+
+    判定规则：
+        1. 已经有任何人数标签（`_SUBJECT_COUNT_TAGS`）→ 原样返回，不碰
+        2. 数一数有几个「角色标签」：
+           - 命中 `character_tags`（词库里的角色名，已排除作品名）
+           - 或者长得像消歧标签 `xxx_(yyy)`（词库没覆盖的角色）
+        3. **恰好 1 个** → 在最前面插入 `solo`
+
+    为什么补 `solo` 而不是 `1girl`：
+        词库只存了角色名的英文标签，**没有性别信息**（`kamisato ayaka` 是女的，
+        但代码无从得知）。猜错性别比不写更糟 —— `1girl` + 一个男性角色会让
+        模型在两者间摇摆。`solo` 只表达「画面里只有一个人」，不分性别，
+        任何情况下都不会翻车。
+
+    为什么 0 个和 ≥2 个都不动：
+        0 个 = 没有识别出角色，可能是纯风景，补 solo 是错的；
+        ≥2 个 = 多人场景，人数和性别都不确定，宁缺勿错（补 `1girl` 可能把
+        两个人画成一个）。
+
+    Args:
+        tags: 待处理的标签串
+        character_tags: 词库里的角色标签集合（归一化后的形式）。
+            传 None 或空集合时只靠括号写法判断。
+
+    Returns:
+        处理后的标签串（未命中任何条件时原样返回）
+    """
+    if not tags:
+        return tags
+
+    parts = [p.strip() for p in tags.split(",") if p.strip()]
+    if not parts:
+        return tags
+
+    normalized = [_normalize_tag_key(_strip_tag_syntax(p)) for p in parts]
+
+    # 规则 1：已有人数标签 → 交给模型/用户，不插手
+    if any(n in _SUBJECT_COUNT_TAGS for n in normalized):
+        return tags
+
+    # 规则 2：数角色标签
+    known = character_tags or set()
+    count = 0
+    for n in normalized:
+        if not n:
+            continue
+        if n in known or _looks_like_character_tag(n):
+            count += 1
+
+    # 规则 3：恰好一个角色 → 补 solo
+    if count == 1:
+        return ", ".join(["solo"] + parts)
+
+    return tags
+
+
 def _wrap_quality_tags(tags: str, weight: str = _QUALITY_WEIGHT) -> str:
     """给未被加权过的质量标签套上权重语法。
 
@@ -348,7 +532,10 @@ class TranslateManager:
                 "[Translate] 词库全命中（%d 条），跳过模型：%s",
                 len(hits), "、".join(hits[:8]),
             )
-            return merged
+            # v1.4.4 之前这里直接 `return merged`，跳过了近义折叠 / 补 solo /
+            # 质量词加权 —— 结果就是词库全命中的输入反而少了一层处理。
+            # 两条返回路径现在统一走 _finalize()。
+            return self._finalize(merged)
 
         if hits:
             logger.info(
@@ -397,16 +584,42 @@ class TranslateManager:
         else:
             final = translated
 
-        # 去重之后再折叠近义标签（swimsuit+bikini → swimsuit），
-        # 否则模型补出的近义词会和词库结果一起被加权
-        final = _collapse_synonyms(final)
+        return self._finalize(final)
 
-        # 质量词自动加权（放在最后一步：去重和折叠都做完后再套权重，
-        # 避免出现 `1.2::best quality::` 与 `best quality` 同时存在）
+    def _finalize(self, tags: str) -> str:
+        """两条返回路径（词库全命中 / 走了模型）共用的收尾。
+
+        顺序有讲究，别乱换：
+            1. 折叠近义标签（swimsuit+bikini → swimsuit）—— 先做，否则模型补出的
+               近义词会和词库结果一起被后面的步骤当成两个概念
+            2. 补人数标签（v1.4.4）—— 放在折叠之后，因为折叠可能把
+               `1girl, female` 收成 `1girl`，这时就不该再补 solo；
+               又必须在质量词加权之前，否则 `1.2::1girl::` 已经被包了权重，
+               虽然 _strip_tag_syntax 能剥，但少一层依赖更稳
+            3. 质量词自动加权 —— 最后一步，去重和折叠都做完后再套权重，
+               避免出现 `1.2::best quality::` 与 `best quality` 同时存在
+        """
+        final = _collapse_synonyms(tags)
+
+        final = _ensure_subject_count(final, self._character_tags())
+
         if self.quality_weight_enabled:
             final = _wrap_quality_tags(final, self.quality_weight_value)
 
         return _clean_result(final)
+
+    def _character_tags(self) -> set[str]:
+        """拿词库里的角色标签集合，任何异常都退成空集合。
+
+        self.dictionary 可能是 None（测试里手动置空）、可能 disabled、
+        也可能是老版本没有 character_tags 属性 —— 都不能让翻译炸掉。
+        退成空集合时 _ensure_subject_count 只靠括号写法判断，功能降级但可用。
+        """
+        d = getattr(self, "dictionary", None)
+        if d is None or not getattr(d, "enabled", False):
+            return set()
+        tags = getattr(d, "character_tags", None)
+        return tags if isinstance(tags, set) else set()
 
     async def _translate_with_candidates(self, candidates: list[Any], text: str) -> str:
         """带轮询地调用模型翻译（某个失败自动换下一个）"""

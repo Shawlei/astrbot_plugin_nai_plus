@@ -161,6 +161,58 @@ merged, remaining, hits, misses = apply_dictionary("绝区零 卢西娅", d)
 check(merged == "zenless zone zero, lucia elowen" and not remaining, f"绝区零 卢西娅 → {merged!r} 剩余 {remaining!r}")
 
 # ---------------------------------------------------------------------------
+# 6. v1.4.4：连接词不再阻断子串兜底 —— 整句全命中、不调模型
+#    线上原句：`原神神里绫华穿着泳衣在沙滩玩耍`，以前因为「穿着」「在」
+#    两个虚词导致整句交给模型（模型还把 1girl 弄丢了）。
+# ---------------------------------------------------------------------------
+_HAS_CJK = re.compile(r"[\u4e00-\u9fff]")
+sentence = "原神神里绫华穿着泳衣在沙滩玩耍"
+merged, remaining, hits, misses = apply_dictionary(sentence, d)
+check(remaining == "", f"整句应全命中，remaining 应为空，实际 {remaining!r}（misses={misses}）")
+check(not _HAS_CJK.search(merged), f"merged 不应残留中文：{merged!r}")
+check(hits and not misses, f"应有 hits 且无 misses：hits={hits} misses={misses}")
+for want in ("genshin impact", "kamisato ayaka", "swimsuit", "beach", "playing"):
+    check(want in merged, f"merged 缺少 {want!r}：{merged!r}")
+# 连接词本身不能漏进结果（英文里当然没有，但要确认没有残留逗号垃圾）
+check(",," not in merged and not merged.startswith(",") and not merged.endswith(","),
+      f"merged 格式脏：{merged!r}")
+
+# 只有连接词 + 词库词的组合都应命中
+for inp in ("神里绫华穿着泳衣", "在沙滩玩耍", "一个神里绫华", "戴着帽子的神里绫华"):
+    merged, remaining, hits, misses = apply_dictionary(inp, d)
+    check(remaining == "" and not _HAS_CJK.search(merged), f"{inp!r} 应全命中，实际 merged={merged!r} remaining={remaining!r}")
+
+# 反例必须仍成立：`超级赛亚人发型` 里 `亚人`→ajin 命中但残留 `超级赛`/`发型`
+# 不是连接词 → 仍放弃兜底、进 misses（半截命中比不命中更危险）
+merged, remaining, hits, misses = apply_dictionary("一个婴儿，超级赛亚人发型", d)
+check("超级赛亚人发型" in misses, f"反例 `超级赛亚人发型` 应进 misses，实际 misses={misses} merged={merged!r}")
+check("ajin" not in merged, f"反例不应把 ajin 半截塞进 merged：{merged!r}")
+check("baby" in merged, f"`婴儿` 应正常命中：{merged!r}")
+
+# 残留里混有非连接词的其他情况也要放弃：`神里绫华穿着红色的泳衣`
+# （`红色` 词库若没有，则残留 `红色` 不是连接词 → 放弃整段）
+merged, remaining, hits, misses = apply_dictionary("神里绫华穿着奇怪的泳衣", d)
+check("神里绫华穿着奇怪的泳衣" in misses or not _HAS_CJK.search(merged),
+      f"含非连接词残留的片段应整段放弃或完全命中，不能半截：merged={merged!r} misses={misses}")
+
+# ---------------------------------------------------------------------------
+# 7. v1.4.4：character_tags 只含角色名，不含作品名 / 非角色词
+# ---------------------------------------------------------------------------
+ct = d.character_tags
+check(isinstance(ct, set) and len(ct) > 500, f"character_tags 应为较大的集合，实际 {type(ct).__name__} len={len(ct) if isinstance(ct, set) else '?'}")
+for want in ("kamisato ayaka", "raiden shogun", "bianca (pgr)", "denia (wuthering waves)",
+             "amiya (arknights)", "arona (blue archive)", "artoria pendragon", "hatsune miku"):
+    check(want in ct, f"character_tags 应含角色 {want!r}")
+for bad in ("swimsuit", "beach", "playing", "genshin impact", "wuthering waves", "blue archive",
+            "arknights", "fate (series)", "nier (series)", "touhou", "overwatch",
+            "zenless zone zero", "hololive", "ajin", "saiyan", "anime", "kamehameha"):
+    check(bad not in ct, f"character_tags 不应含作品名/非角色词 {bad!r}")
+
+# 词库新增词条（v1.4.4）
+check(d.lookup("玩耍") == "playing" and d.lookup("嬉戏") == "playing", "新增词条 玩耍/嬉戏 → playing")
+check(d.lookup("玩") is None, "不应收录单字「玩」（会误伤「玩偶」）")
+
+# ---------------------------------------------------------------------------
 # 汇总
 # ---------------------------------------------------------------------------
 total = PASSED + len(FAILED)

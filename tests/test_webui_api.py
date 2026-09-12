@@ -606,6 +606,80 @@ i18n = json.loads((ROOT / ".astrbot-plugin" / "i18n" / "zh-CN.json").read_text(e
 check(i18n.get("pages", {}).get("nai-config", {}).get("title"), "zh-CN.json 缺 pages.nai-config.title")
 
 # ---------------------------------------------------------------------------
+# 11. v1.4.4：单角色自动补 solo（_ensure_subject_count 纯函数）
+# ---------------------------------------------------------------------------
+from astrbot_plugin_nai_plus.core import translate_manager as tm  # noqa: E402
+
+esc = tm._ensure_subject_count
+CT = {"kamisato ayaka", "raiden shogun", "artoria pendragon", "saber"}
+
+# 已有人数标签 → 原样不动（裸的 / 带权重 / 带花括号 / 多人 / 无人）
+check(esc("1girl, kamisato ayaka", CT) == "1girl, kamisato ayaka", "已有 1girl 不应再补")
+check(esc("{{1girl}}, kamisato ayaka", CT) == "{{1girl}}, kamisato ayaka", "{{1girl}} 应视为已有人数标签")
+check(esc("1.2::1girl::, kamisato ayaka", CT) == "1.2::1girl::, kamisato ayaka", "1.2::1girl:: 应视为已有人数标签")
+check(esc("[1boy], kamisato ayaka", CT) == "[1boy], kamisato ayaka", "[1boy] 应视为已有人数标签")
+check(esc("2girls, kamisato ayaka, raiden shogun", CT) == "2girls, kamisato ayaka, raiden shogun", "已有 2girls 不应再补 solo")
+check(esc("no humans, beach", CT) == "no humans, beach", "no humans 不应补 solo")
+check(esc("solo, kamisato ayaka", CT) == "solo, kamisato ayaka", "已有 solo 不应重复补")
+
+# 恰好一个角色 → 前插 solo
+check(esc("kamisato ayaka, swimsuit, beach", CT) == "solo, kamisato ayaka, swimsuit, beach", "词库角色 → 应前插 solo")
+check(esc("kamisato_ayaka_(genshin_impact), swimsuit", set()) == "solo, kamisato_ayaka_(genshin_impact), swimsuit",
+      "消歧写法 xxx_(yyy) 在无 character_tags 时也应靠括号识别为角色")
+check(esc("Kamisato_Ayaka, swimsuit", CT) == "solo, Kamisato_Ayaka, swimsuit", "大小写 / 下划线应归一化后匹配 character_tags")
+check(esc("genshin impact, kamisato ayaka, swimsuit, beach, playing", CT)
+      == "solo, genshin impact, kamisato ayaka, swimsuit, beach, playing",
+      "作品名 genshin impact 不在 character_tags 里，不应被数成第二个角色")
+# `fate_(series)` 是作品标签不算角色；saber 在 character_tags 里算 1 个 → 补 solo
+check(esc("fate_(series), saber", CT) == "solo, fate_(series), saber", "fate_(series) 不算角色，saber 算 1 个 → 补 solo")
+check(esc("fate_(series), fate/grand_order", CT) == "fate_(series), fate/grand_order", "只有作品标签 → 0 个角色，不补")
+
+# 两个角色 → 不动
+check(esc("kamisato ayaka, raiden shogun", CT) == "kamisato ayaka, raiden shogun", "两个角色不应补 solo")
+check(esc("bianca_(pgr), lucia_(pgr)", set()) == "bianca_(pgr), lucia_(pgr)", "两个消歧角色不应补 solo")
+
+# 画师标签 / 空输入 / 纯风景
+check(esc("artist:foo_(bar), swimsuit", set()) == "artist:foo_(bar), swimsuit", "artist:xxx_(yyy) 不算角色")
+check(esc("inuyasha_(character)", set()) == "inuyasha_(character)", "(character) 后缀不算作品消歧，不补")
+check(esc("", CT) == "", "空串原样返回")
+check(esc("beach, sunset, ocean", CT) == "beach, sunset, ocean", "纯风景不补 solo")
+
+# _strip_tag_syntax 的边界
+check(tm._strip_tag_syntax("{{1girl}}") == "1girl" and tm._strip_tag_syntax("1.2::1girl::") == "1girl"
+      and tm._strip_tag_syntax("[detailed]") == "detailed" and tm._strip_tag_syntax("\\n20::best quality::") == "best quality",
+      "_strip_tag_syntax 应能剥掉 {{}} / [] / n::x:: 三种语法")
+
+# 端到端：TranslateManager.translate() 词库全命中路径（不需要模型）
+t_mgr = tm.TranslateManager({"translate_enabled": True, "translate_mode": "astrbot",
+                             "translate_dictionary_enabled": True, "translate_quality_weight": True}, context=None)
+t_out = asyncio.run(t_mgr.translate("原神神里绫华穿着泳衣在沙滩玩耍"))
+check(t_out.startswith("solo, "), f"词库全命中路径结果应以 solo 开头：{t_out!r}")
+check(not tm.has_cjk(t_out), f"结果不应含中文：{t_out!r}")
+for want in ("genshin impact", "kamisato ayaka", "swimsuit", "beach", "playing"):
+    check(want in t_out, f"端到端结果缺 {want!r}：{t_out!r}")
+check(t_mgr.last_stats.get("dict_bypassed") is True, f"该句应完全绕过模型：{t_mgr.last_stats}")
+# 已带 1girl 的输入走全命中路径不应再补 solo；质量词加权仍生效（_finalize 收口）
+t_out2 = asyncio.run(t_mgr.translate("1girl, 神里绫华, best quality"))
+check(t_out2.startswith("1girl") and "solo" not in t_out2, f"已有 1girl 不应再补 solo：{t_out2!r}")
+check("1.2::best quality::" in t_out2, f"词库全命中路径也应做质量词加权（_finalize 收口）：{t_out2!r}")
+# 多角色不补
+t_out3 = asyncio.run(t_mgr.translate("神里绫华 雷电将军"))
+check("solo" not in t_out3 and "1girl" not in t_out3, f"两个角色不应补人数标签：{t_out3!r}")
+# dictionary 为 None 时不炸（_character_tags 容错）
+t_mgr.dictionary = None
+check(t_mgr._character_tags() == set(), "dictionary 为 None 时 _character_tags 应退成空集合")
+
+# 系统提示词硬化：规则 7 变 MUST；示例与规则不再矛盾；schema 默认值同步
+sp = tm.SYSTEM_PROMPT
+check("MANDATORY" in sp and "MUST include `1girl` or `1boy`" in sp, "规则 7 应为硬约束（MANDATORY / MUST）")
+check("when applicable" not in sp, "规则 7 不应再有 when applicable 软措辞")
+check("Output: 1girl, bianca_(punishing:_gray_raven), swimsuit" in sp, "比安卡示例 Output 应带 1girl")
+check("Output: 1girl, dania_(wuthering_waves), swimsuit" in sp, "达妮娅示例 Output 应带 1girl")
+check("Output: 1girl, raiden shogun, purple hair" in sp, "雷电将军示例 1girl 应移到最前")
+check("depth of field, 1girl" not in sp and "depth of field\n" in sp, "赛博朋克城市示例不应脑补 1girl")
+check(schema["translate_system_prompt"]["default"] == sp, "_conf_schema.json 的 translate_system_prompt.default 必须与 SYSTEM_PROMPT 逐字节一致")
+
+# ---------------------------------------------------------------------------
 # 汇总
 # ---------------------------------------------------------------------------
 total = PASSED + len(FAILED)
