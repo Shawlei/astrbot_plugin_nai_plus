@@ -11,6 +11,7 @@ Nai2API AstrBot 生图插件（nai_plus 增强版）
 这样它能和原版插件同时装在同一台 AstrBot 上，不会互相顶掉。
 """
 
+import asyncio
 import re
 import time
 from pathlib import Path
@@ -21,6 +22,36 @@ import mcp
 # 插件名。AstrBot 用这个名字区分插件，也是数据目录名。
 # 改这里要注意：数据目录会跟着变，已有预设/缓存不会自动迁移。
 PLUGIN_NAME = "astrbot_plugin_nai_plus"
+
+
+class ImageSendError(Exception):
+    """图片已经生成、保存到本地，但发到聊天平台失败。
+
+    单独定义一个异常类型，是为了让调用方能区分「生图失败」和「发图失败」：
+    前者是 NovelAI / Nai2API 的问题，后者是 QQ 客户端（NapCat 等）的问题，
+    给用户的提示和排查方向完全不同。
+    """
+
+    def __init__(self, image_path: Path, cause: Exception):
+        self.image_path = image_path
+        self.cause = cause
+        super().__init__(f"图片发送失败: {_short_err(cause)}")
+
+
+def _short_err(e: BaseException, limit: int = 160) -> str:
+    """把平台适配器的异常压成一行可读文本。
+
+    NapCat 的 ActionFailed 把整个 NTQQ 事件名塞进 message 里，一行能有几百字，
+    而且 str() 后带换行和 `{}`，直接发给用户或写日志都很难看。这里只保留
+    第一行、截断到 limit。
+    """
+    text = str(e) or e.__class__.__name__
+    # ActionFailed 的 repr 形如 <ActionFailed status='failed', retcode=1200, ..., message='Timeout: ...'>
+    m = re.search(r"message='([^']*)'", text)
+    if m:
+        text = m.group(1)
+    text = text.strip().splitlines()[0] if text.strip() else e.__class__.__name__
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -609,7 +640,7 @@ class Nai2ApiPlugin(Star):
                         },
                         "custom_presets": _custom_presets_payload(),
                         "builtin_presets": _builtin_presets_payload(),
-                        "version": "1.4.2",
+                        "version": "1.4.3",
                     }
                 )
             except Exception as e:
@@ -1173,6 +1204,11 @@ class Nai2ApiPlugin(Star):
         except Exception as e:
             logger.error("[PresetManager] 预设回写配置失败: %s", e)
 
+    # 发图重试次数与间隔。QQ（NapCat / NTQQ）发大图偶发 `sendMsg Timeout`
+    # （retcode=1200），多数情况下隔一两秒再发一次就成功了。
+    _SEND_RETRIES = 2
+    _SEND_RETRY_DELAY = 2.0
+
     async def _send_image_with_info(
         self, event: AstrMessageEvent, image_path: Path,
         preset_name: str | None, elapsed: float, model: str | None = None,
@@ -1180,23 +1216,59 @@ class Nai2ApiPlugin(Star):
         is_img2img: bool = False,
         strength: float | None = None,
     ):
-        """发送图片+信息标签"""
-        # 先发图片
-        await event.send(event.image_result(str(image_path)))
+        """发送图片+信息标签。
 
-        # 如果开启了信息标签，则发送标签
+        发图失败会重试（见 _SEND_RETRIES）。重试仍失败时抛 ImageSendError，
+        让调用方能把「图已生成但发不出去」和「生图本身失败」区分开来 ——
+        这两种情况对用户的意义完全不同：前者点数已扣、图在本地，后者才是真没画出来。
+
+        为什么要区分（踩坑记录）：
+            v1.4.2 之前生图和发图包在同一个 try 里，QQ 端 `NodeIKernelMsgService/sendMsg`
+            超时（NapCat 的 retcode=1200）也会被记成「[Nai2API] 生图失败」，
+            用户以为 NovelAI 挂了，实际是 QQ 客户端发大图慢了一步。
+        """
+        last_err: Exception | None = None
+        for attempt in range(1, self._SEND_RETRIES + 1):
+            try:
+                await event.send(event.image_result(str(image_path)))
+                last_err = None
+                break
+            except Exception as e:  # noqa: BLE001 —— 平台适配器抛的类型五花八门
+                last_err = e
+                logger.warning(
+                    "[Nai2API] 发送图片失败（第 %d/%d 次）: %s",
+                    attempt, self._SEND_RETRIES, _short_err(e),
+                )
+                if attempt < self._SEND_RETRIES:
+                    await asyncio.sleep(self._SEND_RETRY_DELAY)
+        if last_err is not None:
+            raise ImageSendError(image_path, last_err) from last_err
+
+        # 如果开启了信息标签，则发送标签。标签发失败不算大事，图已经到了，只记日志
         if self._show_image_info:
             # 用户没写 --strength 时，实际生效的是配置里的默认值，
             # 这里要显示「真正用出去的那个数」，否则标签会退化成一个没信息量的「图生图」
             shown_strength = strength
             if is_img2img and shown_strength is None:
                 shown_strength = self.img2img.default_strength
-            await event.send(event.plain_result(
-                self._build_info_label(
-                    preset_name, elapsed, model,
-                    is_img2img=is_img2img, strength=shown_strength,
-                )
-            ))
+            try:
+                await event.send(event.plain_result(
+                    self._build_info_label(
+                        preset_name, elapsed, model,
+                        is_img2img=is_img2img, strength=shown_strength,
+                    )
+                ))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[Nai2API] 信息标签发送失败（图片已送达）: %s", _short_err(e))
+
+    def _send_failed_text(self, err: "ImageSendError") -> str:
+        """图已生成但发不出去时给用户的说明。"""
+        return (
+            "图片已经生成好了，但发到聊天里时超时了（是 QQ 客户端那边没响应，"
+            "NovelAI 那边是正常的，点数已正常消耗）。\n"
+            f"图片已保存在服务器：{err.image_path}\n"
+            "可以稍等几秒再试一次，如果反复出现，请检查 NapCat / QQ 客户端是否卡顿。"
+        )
 
     def _build_info_label(
         self, preset_name: str | None, elapsed: float, model: str | None = None,
@@ -1491,13 +1563,6 @@ class Nai2ApiPlugin(Star):
                 seed=seed, model=model,
                 ref_image_path=ref_image_path, strength=strength, noise=noise,
             )
-            elapsed = time.time() - start
-            await self._send_image_with_info(
-                event, image_path, preset_name, elapsed, model,
-                is_img2img=bool(ref_image_path),
-                strength=strength,
-            )
-            return None
         except Exception as e:
             logger.error("[Nai2API] 生图失败: %s", e)
             # 失败时也显示信息标签
@@ -1509,6 +1574,23 @@ class Nai2ApiPlugin(Star):
                 )
                 return event.plain_result(info_text)
             return event.plain_result(f"生图失败: {e}")
+
+        # 生图成功，图已落盘。发图失败是另一类问题，单独处理
+        elapsed = time.time() - start
+        try:
+            await self._send_image_with_info(
+                event, image_path, preset_name, elapsed, model,
+                is_img2img=bool(ref_image_path),
+                strength=strength,
+            )
+        except ImageSendError as e:
+            logger.error("[Nai2API] 图片已生成但发送失败: %s（文件 %s）", _short_err(e.cause), image_path)
+            # 发图都超时了，发文字大概率也慢，但文字小得多、成功率高很多，值得试一下
+            try:
+                return event.plain_result(self._send_failed_text(e))
+            except Exception:  # noqa: BLE001
+                return None
+        return None
 
     async def _handle_pending_confirm(self, event: AstrMessageEvent, args: str) -> tuple[bool, object]:
         """处理高扣点生图的二次确认。
@@ -1907,20 +1989,6 @@ class Nai2ApiPlugin(Star):
                 strength=strength_val,
             )
             elapsed = time.time() - start
-
-            await self._send_image_with_info(
-                event, image_path, preset.strip() or None, elapsed, final_model,
-                is_img2img=bool(ref_image_path),
-                strength=strength_val,
-            )
-
-            mode = "图生图" if ref_image_path else "文生图"
-            return mcp.types.CallToolResult(
-                content=[mcp.types.TextContent(
-                    type="text",
-                    text=f"图片已生成并发送给用户（{mode}）。英文提示词: {prompt_en[:100]}"
-                )]
-            )
         except Exception as e:
             logger.error("[Nai2API] LLM 工具生图失败: %s", e)
             # 失败时也显示信息标签
@@ -1935,6 +2003,38 @@ class Nai2ApiPlugin(Star):
             return mcp.types.CallToolResult(
                 content=[mcp.types.TextContent(type="text", text=f"生图失败: {e}")]
             )
+
+        # 生图成功，图已落盘。发图失败单独处理（见 _send_image_with_info 说明）
+        mode = "图生图" if ref_image_path else "文生图"
+        try:
+            await self._send_image_with_info(
+                event, image_path, preset.strip() or None, elapsed, final_model,
+                is_img2img=bool(ref_image_path),
+                strength=strength_val,
+            )
+        except ImageSendError as e:
+            logger.error("[Nai2API] 图片已生成但发送失败: %s（文件 %s）", _short_err(e.cause), image_path)
+            try:
+                await event.send(event.plain_result(self._send_failed_text(e)))
+            except Exception:  # noqa: BLE001
+                pass
+            # 告诉模型真实情况：图生成了、只是没发出去。别让它以为生图挂了去重试（会重复扣点）
+            return mcp.types.CallToolResult(
+                content=[mcp.types.TextContent(
+                    type="text",
+                    text=(
+                        f"图片已成功生成（{mode}），但发送到聊天平台时超时，用户可能没收到。"
+                        "不要重试生图（会重复扣点），直接告知用户稍后再试即可。"
+                    ),
+                )]
+            )
+
+        return mcp.types.CallToolResult(
+            content=[mcp.types.TextContent(
+                type="text",
+                text=f"图片已生成并发送给用户（{mode}）。英文提示词: {prompt_en[:100]}"
+            )]
+        )
 
     @filter.llm_tool(name="nai_get_balance")
     async def nai_get_balance_tool(self, event: AstrMessageEvent, detail: str):

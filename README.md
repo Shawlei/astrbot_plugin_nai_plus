@@ -1172,6 +1172,30 @@ AI：来啦，正在用 AI 画笔创作... 🖌️
 
 ---
 
+## 常见报错
+
+<details>
+<summary><b>「图片已经生成好了，但发到聊天里时超时了」/ 日志里有 <code>NodeIKernelMsgService/sendMsg</code> Timeout</b></summary>
+
+这**不是生图失败**。`NodeIKernelMsgService/sendMsg` 是 QQ 客户端（NapCat / NTQQ）发消息的内部接口，`retcode=1200` 是它的「发送超时」——图已经画好、点数已经扣了、文件也存到 `data/images/` 了，只是最后一步把图发进 QQ 时客户端没及时回应，发大图（2K / 4K）时偶发。
+
+插件会自动重试一次；还不行就把本地文件路径发给你。处理建议：
+
+1. 稍等几秒再发一次指令
+2. 反复出现 → 看 NapCat / QQ 客户端是否卡顿、内存是否吃紧，重启一下通常就好
+3. 只在 2K / 4K 出现 → 先用普通尺寸确认发图链路正常
+
+</details>
+
+<details>
+<summary><b>「生图失败: Nai2API 用户密钥未配置」</b></summary>
+
+配置页 `token` 没填或填错了。去 Nai2API 网关拿到密钥填进去，保存后不用重载。
+
+</details>
+
+---
+
 ## 目录结构
 
 ```

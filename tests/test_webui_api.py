@@ -503,6 +503,91 @@ finally:
     api.web = saved_web
 
 # ---------------------------------------------------------------------------
+# 9b. 发图失败 ≠ 生图失败（v1.4.3）
+# ---------------------------------------------------------------------------
+# 背景：QQ（NapCat）发大图偶发 sendMsg Timeout（retcode=1200）。以前生图和发图包在
+# 同一个 try 里，这个超时会被记成「生图失败」，用户以为 NovelAI 挂了。
+# 现在：发图失败要重试；重试仍失败要给用户「图已生成、发送超时」的说明，
+# 而不是「生图失败」。
+
+class _FakeActionFailed(Exception):
+    """模拟 NapCat 的 ActionFailed（str() 是一大段带换行的 repr）"""
+    def __str__(self):
+        return ("<ActionFailed status='failed', retcode=1200, data=None, "
+                "message='Timeout: NTEvent serviceAndMethod:NodeIKernelMsgService/sendMsg "
+                "ListenerName:NodeIKernelMsgListener/onMsgInfoListUpdate EventRet:\\n{}\\n', "
+                "wording='...', echo={'seq': 456}, stream='normal-action'>")
+
+
+class _FakeEvent:
+    """最小化的 AstrMessageEvent：记录发送内容，可按次数注入发图失败"""
+    unified_msg_origin = "test:group:1"
+
+    def __init__(self, fail_image_times: int):
+        self.fail_image_times = fail_image_times
+        self.sent: list[tuple[str, str]] = []
+
+    def image_result(self, p):
+        return ("image", p)
+
+    def plain_result(self, t):
+        return ("plain", t)
+
+    async def send(self, r):
+        kind, payload = r
+        if kind == "image" and self.fail_image_times > 0:
+            self.fail_image_times -= 1
+            raise _FakeActionFailed()
+        self.sent.append(r)
+
+
+fake_img = tmp / "fake.png"
+fake_img.write_bytes(b"\x89PNG\r\n\x1a\nxxxx")
+
+# 让 _do_generate 直接返回假图，不真的调网关；重试间隔调成 0 免得测试慢
+_orig_do_generate = plugin._do_generate
+
+
+async def _fake_do_generate(*a, **k):
+    return fake_img
+
+
+plugin._do_generate = _fake_do_generate
+PluginCls._SEND_RETRY_DELAY = 0.0
+
+# 第一次发图失败、第二次成功 → 用户应正常收到图 + 标签，不该看到任何失败文案
+ev = _FakeEvent(fail_image_times=1)
+res = asyncio.run(plugin._run_generate_command(ev, "1girl", None, None, None, None, None, None))
+kinds = [k for k, _ in ev.sent]
+check(res is None and kinds[0] == "image", f"发图第一次失败应重试成功: sent={ev.sent}, res={res}")
+check(not any("失败" in t for k, t in ev.sent if k == "plain"), "重试成功后不应出现失败文案")
+
+# 全部重试都失败 → 返回「图已生成但发送超时」的说明，绝不能说「生图失败」
+ev = _FakeEvent(fail_image_times=99)
+res = asyncio.run(plugin._run_generate_command(ev, "1girl", None, None, None, None, None, None))
+check(isinstance(res, tuple) and res[0] == "plain", f"发图彻底失败应返回文字说明: {res!r}")
+text = res[1] if isinstance(res, tuple) else ""
+check("已经生成" in text and "生图失败" not in text, f"文案应说明图已生成而非生图失败: {text!r}")
+check(str(fake_img) in text, "文案应带上图片本地路径，方便用户自己去取")
+check("生图失败" not in text and "NodeIKernelMsgService" not in text, "不应把 NapCat 的一大段事件名直接甩给用户")
+
+# 真正的生图失败（_do_generate 抛异常）仍然走老的「生图失败」分支
+async def _boom(*a, **k):
+    raise RuntimeError("Nai2API 500")
+
+
+plugin._do_generate = _boom
+ev = _FakeEvent(fail_image_times=0)
+res = asyncio.run(plugin._run_generate_command(ev, "1girl", None, None, None, None, None, None))
+check(isinstance(res, tuple) and "Nai2API 500" in res[1], f"真正的生图失败应保留原提示: {res!r}")
+plugin._do_generate = _orig_do_generate
+
+# _short_err 能把 ActionFailed 的 repr 压成一行可读的 message
+short = plugin_main._short_err(_FakeActionFailed())
+check(short.startswith("Timeout: NTEvent") and "\n" not in short and len(short) <= 160, f"_short_err 结果不对: {short!r}")
+check(plugin_main._short_err(RuntimeError("")) == "RuntimeError", "空 message 的异常应退回类名")
+
+# ---------------------------------------------------------------------------
 # 10. 前端静态文件基本健全性
 # ---------------------------------------------------------------------------
 page = ROOT / "pages" / "nai-config"
