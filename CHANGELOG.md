@@ -3,6 +3,69 @@
 > 说明：本仓库自 v1.0.0 起独立计数（原项目基于 helloWKQ/AstrBot_Nai2API 二开，
 > 早期内部迭代过 v1.2.0 / v1.3.x，为对接 AstrBot 插件市场，版本号从 1.0.0 重新开始）。
 
+## v1.6.0
+
+把**默认画师串从「写实向 2.5D 唯美风」换成了纯二次元插画风**，并修掉 QA 查出的 3 个翻译链小瑕疵。
+
+### 问题
+
+插件开箱即用的默认画师串（继承自上游 Nai2API 的「2.5D唯美风」）有两个层面的毛病：
+
+1. **风格不符合二次元用户预期**。它是一串写实向提示词（大量 `photorealistic` / `photo (medium)` 类词），权重又给得极大，直接把整个画面往「半写实半动漫」甚至更写实的方向拽 —— 而本插件的主力用户想要的是纯二次元插画。用户需要在每次生图时手动覆盖，否则出来就是写实风。
+2. **默认串还「锁死」了构图、塞了负权重**。默认串里带 `cowboy shot`（强行半身构图）、`-2::green ::`（负权重压绿色），还有一段**字面量 `\n`** 垃圾 token（早期拼接时误把转义符当普通字符串写进了串里，会污染提示词）。这些都不该是「默认」该干的事。
+
+此外，QA 在回归时又查出翻译链的 3 个小瑕疵：
+
+- **N1**：`_SYNONYM_GROUPS` 里有一条 `("solo", "1girl, solo")` 的死条目 —— 同义词折叠是按**逗号**切分单个 tag 的，而这条把「两个 tag 拼在一个字符串里」，永远匹配不上，纯属摆设。
+- **N2**：`_SUBJECT_COUNT_TAGS` 只认规范写法（`1girl` / `2girls` 等），用户写 `7girls` / `1 girls` / `6+ girls` / `multiple girls` 这类非规范拼写时匹配不到，会导致重复补 `solo` 或漏补人物数。
+- **N3**：`TranslateManager.translate()` 在 `dictionary=None`（词库加载失败/未注入）时会抛 `AttributeError`，把一次本可降级的翻译直接变成生图失败。
+
+### 方案
+
+**默认画师串**：换成一串纯二次元插画向的提示词 ——
+
+```
+year 2024, anime style, illustration, best quality, amazing quality, very aesthetic, absurdres, masterpiece, no text
+```
+
+- 不含任何写实向词（`photorealistic` / `photo (medium)` 等）
+- 不含 `cowboy shot`，**构图不再被锁死**（让用户在 prompt 里自由描述）
+- 不含负权重、不含字面量 `\n`
+- 走的是插件词库里 `anime style` 的标准映射（`scene.json` 中「日系/动漫风格/二次元」→ `anime style`），与翻译链自洽
+
+三处副本同步更新，**但「2.5D唯美风」预设里的旧串原样保留**：
+
+| 位置 | 处理 |
+|------|------|
+| `_conf_schema.json` → `default_artist.default` | 改为新串 |
+| `core/nai2api_client.py` → `DEFAULT_ARTIST` | 改为新串 |
+| `core/preset_manager.py` → `BUILTIN_PRESETS["2.5D唯美风"]["artist"]` | **保持不变**（旧的写实串原样保留，供用户一键切回写实风） |
+
+> 想回到旧写实风：`/nai -p 2.5D唯美风`，或在 WebUI 把「2.5D唯美风」设为默认风格。
+
+**N1**：删掉 `("solo", "1girl, solo")` 这条死条目，并加注释说明「同义词折叠按逗号切分单个 tag，跨 tag 的别名永远不会命中，别再写这种条目」。
+
+**N2**：在 `_SUBJECT_COUNT_TAGS` 精确匹配之外，新增一组正则兜底 `_SUBJECT_COUNT_PATTERNS` + 函数 `_is_subject_count_tag()`，覆盖 `7girls` / `1 girls` / `6+ girls` / `multiple girls` / `no humans` 等拼写；同时**保留 `solo focus` 仍按「人物数 tag」处理**（`^solo(?:\s+focus)?$`）。`_ensure_subject_count` 的规则 1 改用 `_is_subject_count_tag()` 判断。
+
+**N3**：在 `translate()` 进入 `apply_dictionary` 之前，先判 `if self.dictionary is None:` —— 记一条 warning、写 `last_stats = {"dict_unavailable": True}`、**直接原样返回输入文本**，绝不抛错。词库不可用时应降级为「不翻译」，而不是让整条生图链路崩掉。
+
+### 行为变更（**注意**）
+
+- **升级后默认出图风格会变**，从「半写实半动漫」变为「纯二次元插画」—— 这是**本次有意为之**，不是 bug。老用户若仍想用写实风，`-p 2.5D唯美风` 即可
+- **默认不再锁 `cowboy shot` 构图**、不再压绿色（`-2::green ::`）。若你此前依赖默认串的构图/去绿效果，请把它们写进自己的画师串
+- 「2.5D唯美风」预设的内容**完全没动**，切回去得到的就是和以前一模一样的串
+
+### 影响面
+
+- **只用默认（没自定义画师串）的人**：出图风格直接变化（见上）
+- **自己配了画师串的人**：不受影响（`default_artist` 只在未显式指定画师串时生效）
+- **N1/N2/N3** 是内部翻译链修复，不影响已有配置；N2 只在用户用了非规范人物数拼写时才会有可见差异（现在是「正确识别」而非「错误补 solo」）
+
+### 测试
+
+- `tests/test_prompt_dict_quality.py` **7960/7960 通过**（本次未动词库）
+- `tests/test_webui_api.py` 237 → **276 项全过**（+39）：断言 `schema.default == nai2api_client.DEFAULT_ARTIST`（两副本一致）；新串不含 `photorealistic` / `realistic` / `photo (medium)` / 字面量 `\n` / 负权重（`-N::`）/ 构图锁（`cowboy shot`）；「2.5D唯美风」预设仍保留旧写实串；N1 同义词组已扁平化（无含逗号的跨 tag 条目）；N2 各种非规范拼写（`7girls` / `1 girls` / `6+ girls` / `multiple girls`）均被识别、`_is_subject_count_tag("")` 与 `("kamisato ayaka")` 返回 False，且回归验证「单角色补 `solo` / 双角色不补 / 纯风景不补」；N3 `dictionary=None` 时 `translate()` 原样返回且 `last_stats["dict_unavailable"] is True`（不抛错）
+
 ## v1.5.0
 
 新增「**默认预设**」功能，并修掉 WebUI 那个只搬画师串的缺陷。

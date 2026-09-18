@@ -145,8 +145,30 @@ def get_generation_cost(model: str | None, size: str | None) -> int:
     return COST_NORMAL_V5 if is_v5_model(model) else COST_NORMAL_V45
 
 
-# Nai2API 官方默认 artist（2.5D唯美风，来自 store.js defaultArtist2_5D）
-DEFAULT_ARTIST = "0.9::misaka_12003-gou ::, dino_(dinoartforame), wanke, liduke, year 2025, realistic, 4k, -2::green ::, textless version, The image is highly intricate finished drawn. Only the character's face is in anime style, but their body is in realistic style. 1.35::A highly finished photo-style artwork that has lively color, graphic texture, realistic skin surface, and lifelike flesh with little obliques::. 1.63::photorealistic::, 1.63::photo(medium)::, \\n20::best quality, absurdres, very aesthetic, detailed, masterpiece::,, very aesthetic, masterpiece, no text, cowboy shot, looking at viewer"
+# 默认 artist（v1.6.0 起 = 日系动漫风，标准二次元插画感）。
+#
+# 为什么换掉了上游 Nai2API 的「2.5D唯美风」：
+#   那一串是**写实风**（含 realistic / 1.63::photorealistic:: / 1.63::photo(medium)::），
+#   且压在提示词最前面、权重极高（还有 20:: 这种过激权重）。用户写「动漫感」的
+#   提示词会被它拉向写实，实测反馈就是「画不出我要的效果」。它还锁死了
+#   `cowboy shot` 构图，让「自动补构图」永不触发。
+#
+# 选词依据：
+#   - `anime style` —— 项目词库里「日系 / 动漫风格 / 二次元」的映射就是它
+#     （core/prompt_dict/scene.json 的 style 分组），保持自洽
+#   - `year 2024` —— 其他内置预设（韩漫小清新风 / 动漫风）也用，拉向现代画风
+#   - 质量词 best quality / amazing quality / very aesthetic / absurdres / masterpiece
+#     **不加极端权重**（老串的 `20::` 是过激值，已去掉）
+#   - `no text` —— 避免画面里冒出文字 / 水印
+#   - **刻意不放构图标签** → 让 auto_composition 正常兜底（老串的 cowboy shot 把它堵死了）
+#
+# 老的那串**没有丢**：完整保留在 BUILTIN_PRESETS["2.5D唯美风"]（core/preset_manager.py）里，
+# 用户想要写实 / 2.5D 效果时随时可以从面板选那个预设切回去。
+# 这是本次敢改默认值的前提 —— 改默认 ≠ 删功能。
+DEFAULT_ARTIST = (
+    "year 2024, anime style, illustration, best quality, amazing quality, "
+    "very aesthetic, absurdres, masterpiece, no text"
+)
 DEFAULT_NEGATIVE = (
     "{{{{bad anatomy}}}},{bad feet},bad hands,{{{bad proportions}}},"
     "{blurry},cloned face,cropped,{{{deformed}}},{{{disfigured}}},"

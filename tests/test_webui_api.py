@@ -1128,6 +1128,106 @@ check(plugin._default_preset == "", f"校验失败时不得改内存: {plugin._d
 plugin._default_preset = _orig_default_preset
 
 # ---------------------------------------------------------------------------
+# 15. v1.6.0：默认画师串换成日系动漫风 + 3 个 QA 瑕疵
+# ---------------------------------------------------------------------------
+# 背景：用户反馈「文生图画不出我要的效果」。根因是插件自带的 default_artist
+# （沿袭上游 Nai2API 的「2.5D唯美风」）其实是**写实风**（realistic /
+# 1.63::photorealistic:: / 1.63::photo(medium)::），压在最前面、权重极高，
+# 还锁死了 cowboy shot 构图、默认压制绿色（-2::green ::）、含一个字面量 `\n`
+# 垃圾 token，整串 589 字符把用户提示词挤到几乎看不见。
+
+from astrbot_plugin_nai_plus.core import nai2api_client as _nc  # noqa: E402
+from astrbot_plugin_nai_plus.core.preset_manager import (  # noqa: E402
+    BUILTIN_PRESETS as _BUILTIN,
+    has_composition as _has_composition,
+    split_negative_weights as _split_neg,
+)
+
+_new_artist = _nc.DEFAULT_ARTIST
+_schema_artist = schema["default_artist"]["default"]
+
+# ① 两份拷贝必须逐字节一致 —— 这是本次最容易出错的点（改一处漏一处）
+check(_schema_artist == _new_artist,
+      "_conf_schema.json 的 default_artist.default 必须等于 nai2api_client.DEFAULT_ARTIST"
+      f"（schema={_schema_artist!r} vs const={_new_artist!r}）")
+
+# ② 新默认串不能含写实词（防回流）
+check("realistic" not in _new_artist, f"新默认串不应含 realistic: {_new_artist!r}")
+check("photorealistic" not in _new_artist, f"新默认串不应含 photorealistic: {_new_artist!r}")
+check("photo(medium)" not in _new_artist, f"新默认串不应含 photo(medium): {_new_artist!r}")
+check("anime style" in _new_artist, f"新默认串应含 anime style（日系动漫风）: {_new_artist!r}")
+
+# ③ 不能含字面量反斜杠+n（老串的垃圾 token，会被当标签发给 NovelAI）
+check("\\n" not in _new_artist,
+      f"新默认串不应含字面量反斜杠+n: {_new_artist!r}")
+
+# ④ 不能含负权重语法（老串的 -2::green :: 会默认压制绿色）
+check(_split_neg(_new_artist)[1] == "",
+      f"新默认串不应含负权重: {_split_neg(_new_artist)!r}")
+
+# ⑤ 不能含构图词 —— 保证 auto_composition 会兜底（老串的 cowboy shot 堵死了它）
+check(_has_composition(_new_artist) is False,
+      f"新默认串不应含构图词，否则 auto_composition 永不触发: {_new_artist!r}")
+
+# ⑥ 老串必须完整保留在「2.5D唯美风」预设里（这是敢改默认值的前提）
+_old = _BUILTIN["2.5D唯美风"]["artist"]
+check("realistic" in _old, "「2.5D唯美风」预设必须仍是老的写实串（别顺手统一改掉）")
+check(len(_old) > 400, f"「2.5D唯美风」预设应是完整老串（589 字符左右），实际 {len(_old)}")
+check("misaka_12003-gou" in _old, "老串里的画师名应还在（确认没被截断）")
+
+# ⑦ N1：近义词组里不能再有跨标签别名（永远命中不了的死条目）
+_flat_syn = [t for g in tm._SYNONYM_GROUPS for t in g]
+check("1girl, solo" not in _flat_syn,
+      f"_SYNONYM_GROUPS 不应含跨标签别名 '1girl, solo'（死条目）: {tm._SYNONYM_GROUPS}")
+check(all("," not in t for t in _flat_syn),
+      f"_SYNONYM_GROUPS 每一项都必须是单个标签，不能含逗号: {_flat_syn}")
+# solo 和 1girl 是不同概念，都不该被折叠掉
+check(tm._collapse_synonyms("solo, 1girl") == "solo, 1girl",
+      "solo 与 1girl 不应互相折叠")
+check(tm._collapse_synonyms("1girl, solo") == "1girl, solo",
+      "1girl 与 solo 不应互相折叠")
+
+# ⑧ N2：非规范人数写法都不能被误补 solo（否则产出矛盾串）
+# 断言「原样返回」而不是「不以 solo 开头」—— 因为 `solo focus` 这种输入
+# 本身就以 solo 开头，以「开头」判断会误伤（写成那样时这条会假失败）。
+_CT = {"kamisato ayaka", "raiden shogun", "saber", "artoria pendragon"}
+for _variant in ("7girls", "1girls", "1 girl", "6+ girls", "6+girls", "8girls",
+                 "3+ boys", "2others", "multiple  girls", "multiple girls",
+                 "no human", "no humans", "solo focus", "solo",
+                 "{{1girl}}", "1.2::1girl::"):
+    _text = f"{_variant}, kamisato ayaka"
+    _out = esc(_text, _CT)
+    check(_out == _text,
+          f"已有非规范人数标签 {_variant!r} 时应原样返回（不补 solo）: {_out!r}")
+
+# ⑨ N2 回归：不能把正常情况改坏
+check(esc("kamisato ayaka, swimsuit, beach", _CT) == "solo, kamisato ayaka, swimsuit, beach",
+      "单个角色仍应补 solo")
+check(esc("kamisato ayaka, raiden shogun", _CT) == "kamisato ayaka, raiden shogun",
+      "两个角色仍不应补 solo")
+check(esc("beach, sunset, ocean", _CT) == "beach, sunset, ocean",
+      "纯风景仍不应补 solo")
+check(tm._is_subject_count_tag("") is False, "空标签不是人数标签")
+check(tm._is_subject_count_tag("kamisato ayaka") is False, "角色名不是人数标签")
+
+# ⑩ N3：dictionary=None 不能抛异常（容错底线）
+_t3 = tm.TranslateManager(
+    {"translate_enabled": True, "translate_mode": "astrbot",
+     "translate_dictionary_enabled": True, "translate_quality_weight": True},
+    context=None,
+)
+_t3.dictionary = None
+try:
+    _n3_out = asyncio.run(_t3.translate("原神神里绫华穿着泳衣"))
+    _n3_raised = None
+except Exception as e:  # noqa: BLE001
+    _n3_out, _n3_raised = None, e
+check(_n3_raised is None, f"dictionary=None 时 translate() 不应抛异常，实际: {_n3_raised!r}")
+check(_n3_out == "原神神里绫华穿着泳衣", f"dictionary=None 时应原样返回输入: {_n3_out!r}")
+check(_t3.last_stats.get("dict_unavailable") is True,
+      f"应记下 dict_unavailable 标记: {_t3.last_stats!r}")
+
+# ---------------------------------------------------------------------------
 # 汇总
 # ---------------------------------------------------------------------------
 total = PASSED + len(FAILED)

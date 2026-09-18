@@ -103,9 +103,9 @@
   },
   "default_artist": {
     "description": "默认画师串/质量前缀",
-    "hint": "留空则不传画师串。Nai2API 默认使用 2.5D唯美风，可通过 -p 预设切换",
+    "hint": "留空则不传画师串。v1.6.0 起默认是**日系动漫风**（标准二次元插画感，最接近动画/游戏立绘），刻意不含构图标签，把构图交给「自动补构图标签」兜底。想要写实 / 2.5D 效果：在 WebUI 面板里选「2.5D唯美风」预设，或把它复制成自己的默认画师串（老的那串完整保留在那个预设里，没有丢）。想要更强的个人风格：用「默认预设」功能套用「动漫风」「韩漫小清新风」等。随时可以在这里自由改写",
     "type": "text",
-    "default": "0.9::misaka_12003-gou ::, dino_(dinoartforame), wanke, liduke, year 2025, realistic, 4k, -2::green ::, textless version, The image is highly intricate finished drawn. Only the character's face is in anime style, but their body is in realistic style. 1.35::A highly finished photo-style artwork that has lively color, graphic texture, realistic skin surface, and lifelike flesh with little obliques::. 1.63::photorealistic::, 1.63::photo(medium)::, \\n20::best quality, absurdres, very aesthetic, detailed, masterpiece::,, very aesthetic, masterpiece, no text, cowboy shot, looking at viewer"
+    "default": "year 2024, anime style, illustration, best quality, amazing quality, very aesthetic, absurdres, masterpiece, no text"
   },
   "auto_composition": {
     "type": "bool",

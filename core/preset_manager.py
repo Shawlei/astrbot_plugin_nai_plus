@@ -32,7 +32,7 @@ from astrbot.api import logger
 BUILTIN_PRESETS: dict[str, dict[str, str]] = {
     "2.5D唯美风": {
         "artist": "0.9::misaka_12003-gou ::, dino_(dinoartforame), wanke, liduke, year 2025, realistic, 4k, -2::green ::, textless version, The image is highly intricate finished drawn. Only the character's face is in anime style, but their body is in realistic style. 1.35::A highly finished photo-style artwork that has lively color, graphic texture, realistic skin surface, and lifelike flesh with little obliques::. 1.63::photorealistic::, 1.63::photo(medium)::, \\n20::best quality, absurdres, very aesthetic, detailed, masterpiece::,, very aesthetic, masterpiece, no text, cowboy shot, looking at viewer",
-        "desc": "2.5D唯美风（Nai2API 默认）",
+        "desc": "2.5D唯美风（上游 Nai2API 原默认・写实向）",
     },
     "韩漫小清新风": {
         "artist": "[[[artist:dishwasher1910]]], {{yd_(orange_maru)}}, [artist:ciloranko], [artist:sho_(sho_lwlw)], [ningen mame], year 2024, full body, standing, looking at viewer",

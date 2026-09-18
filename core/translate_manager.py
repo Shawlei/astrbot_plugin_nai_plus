@@ -205,11 +205,15 @@ def _dedup_tags(tags: str) -> str:
 # 在这个概念上过拟合；更麻烦的是 swimsuit 和 bikini 是**不同款式**，
 # 同时写会让模型在两者之间摇摆，画出来的衣服经常不伦不类。
 # 注意：只处理「确实等价」的，不做语义相近但不同的合并（如 skirt/dress 不并）。
+#
+# 另外：组内的每一项必须是**单个标签**，不能写 `"1girl, solo"` 这种跨标签的串。
+# `_collapse_synonyms` 是按逗号切分后**逐段**比对的，任何一段都不可能等于
+# `'1girl, solo'`（那是两个标签），所以那种写法是永远命中不了的死条目 ——
+# 曾经真的这么写过，v1.6.0 删掉了。想表达「有 solo 就够了」请分别列 `solo`。
 _SYNONYM_GROUPS: tuple[tuple[str, ...], ...] = (
     ("swimsuit", "bikini", "one-piece swimsuit", "school swimsuit"),
     ("1girl", "female", "woman", "girl"),
     ("1boy", "male", "man", "boy"),
-    ("solo", "1girl, solo"),
 )
 
 
@@ -257,6 +261,38 @@ _SUBJECT_COUNT_TAGS: frozenset[str] = frozenset({
     "solo", "solo focus",
     "no humans",
 })
+
+# 上面那个集合只是「快速路径」，只覆盖规范写法。它挡不住用户 / 模型写的变体：
+# `7girls`（集合里没有 7 这个数）、`1girls`、`1 girl`（带空格）、`6+ girls`、
+# `multiple  girls`…… 这些一旦漏掉，就会被误补一个自相矛盾的 `solo`。
+# 线上复现：`esc('7girls, kamisato ayaka')` → `'solo, 7girls, kamisato ayaka'`。
+# 所以 v1.6.0 再加一层「按写法识别」的兜底。
+#
+# 输入到这里的标签已经被 `_normalize_tag_key` 归一化过（小写 + 下划线转空格 +
+# 空白收敛），所以这些正则只按**单空格**写就行。
+_SUBJECT_COUNT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^\d+\s*girls?$"),                      # 1girl / 7girls / 1 girl
+    re.compile(r"^\d+\s*boys?$"),                       # 1boy / 7boys / 1 boy
+    re.compile(r"^\d+\s*others?$"),                     # 1other / 2others
+    re.compile(r"^\d+\+\s*(?:girls|boys|others)$"),     # 6+ girls / 6+girls
+    re.compile(r"^multiple\s+(?:girls|boys|others)$"),  # multiple girls / multiple  girls
+    re.compile(r"^no\s+humans?$"),                      # no humans / no human
+    re.compile(r"^solo(?:\s+focus)?$"),                 # solo / solo focus
+)
+
+
+def _is_subject_count_tag(normalized: str) -> bool:
+    """判断一个**已归一化**的标签是不是「人数标签」。
+
+    先查集合（快路径），命中不了再走正则兜底（覆盖非规范写法）。
+    这样即使以后 NovelAI / 用户引入新的写法（`8girls`、`3+ boys`），也只需
+    往 `_SUBJECT_COUNT_PATTERNS` 里加一条，不用维护穷举列表。
+    """
+    if not normalized:
+        return False
+    if normalized in _SUBJECT_COUNT_TAGS:
+        return True
+    return any(p.match(normalized) for p in _SUBJECT_COUNT_PATTERNS)
 
 # 形如 `xxx_(yyy)` / `xxx (yyy)` 的消歧写法里，括号里是作品名的情况：
 # `fate_(series)` 这种是**作品**标签，不能算作「画里有一个人」。
@@ -353,7 +389,8 @@ def _ensure_subject_count(tags: str, character_tags: set[str] | None) -> str:
         但模型不听话是常态，所以代码层再兜一道。
 
     判定规则：
-        1. 已经有任何人数标签（`_SUBJECT_COUNT_TAGS`）→ 原样返回，不碰
+        1. 已经有任何人数标签（`_is_subject_count_tag`，集合快速路径 +
+           `_SUBJECT_COUNT_PATTERNS` 写法兜底）→ 原样返回，不碰
         2. 数一数有几个「角色标签」：
            - 命中 `character_tags`（词库里的角色名，已排除作品名）
            - 或者长得像消歧标签 `xxx_(yyy)`（词库没覆盖的角色）
@@ -388,7 +425,7 @@ def _ensure_subject_count(tags: str, character_tags: set[str] | None) -> str:
     normalized = [_normalize_tag_key(_strip_tag_syntax(p)) for p in parts]
 
     # 规则 1：已有人数标签 → 交给模型/用户，不插手
-    if any(n in _SUBJECT_COUNT_TAGS for n in normalized):
+    if any(_is_subject_count_tag(n) for n in normalized):
         return tags
 
     # 规则 2：数角色标签
@@ -518,6 +555,19 @@ class TranslateManager:
             return ""
 
         self.last_stats = {}
+
+        # 容错底线：词库对象为空时不能让整个流程炸掉。
+        # `self.dictionary` 在 `__init__` 里必然被赋成 PromptDictionary，理论上
+        # 不会为 None；但一旦为 None，旧代码会在 apply_dictionary 里抛
+        # AttributeError（`dictionary.enabled`），把生图整个打断。
+        # 项目原则：代价只能是「该功能不生效」，绝不能是插件报错 / 生图失败。
+        # 这里记一条日志、原样返回输入，让调用方继续走后面的流程。
+        if self.dictionary is None:
+            logger.warning(
+                "[Translate] 词库未初始化（dictionary=None），本次跳过直译、原样返回"
+            )
+            self.last_stats = {"dict_unavailable": True}
+            return text
 
         # ---- 第一段：词库直译 ----
         merged, remaining, hits, misses = apply_dictionary(text, self.dictionary)
