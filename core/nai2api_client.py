@@ -342,19 +342,31 @@ class Nai2ApiClient:
         if self.auto_composition:
             prompt_body, composed = ensure_composition(prompt, final_artist or "")
 
-        # 画师串必须拼进 tag —— 否则它等于没生效。
+        # 画师串必须走**独立的 `artist` 请求参数**，绝不能拼进 `tag`。
         #
-        # 这里踩过一个坑：原先把画师串单独放在 `artist` 请求参数里发出去，
-        # 结果预设里写的 `artist collaboration` / `year 2024` / `perspective`
-        # 这类**正向提示词内容**全部丢失，表现为「画风不生效、什么图都是
-        # 上半身」—— 因为构图类标签没进 prompt，NAI 会退回训练数据的统计
-        # 偏好（默认出 portrait / upper body）。
+        # 为什么（v1.6.2 改回上游做法，附服务端源码证据）：
+        #   Nai2API **服务端**（`STA1N156/Nai2API`，`server/providers.js`）这样处理请求：
+        #       const tag    = normalizePromptText(input.tag || input.prompt || '').trim();
+        #       const artist = normalizePromptText(input.artist ?? settings.defaultArtist ?? '').trim();
+        #       const prompt = [artist, tag].filter(Boolean).join('\n');
+        #   即：真正发给 NovelAI 的是 `artist + "\n" + tag`；`artist` 取 `input.artist`，
+        #   **取不到就退回服务端自己存的 `settings.defaultArtist`**（默认是一串 2.5D 写实画师串）。
         #
-        # 顺序：画师串在前（含质量词与画风，属于全局风格），
-        #       用户提示词在后（描述具体画面内容）。这也是 NAI 的常见写法。
+        #   于是，如果本插件不发 `artist`、而是把画师串拼进 `tag`（本 fork 之前的做法），
+        #   服务端每次都会用**它自己的**默认画师串打头：
+        #       发给 NovelAI = 【服务端默认画师串】+ "\n" + 【用户的画师串, 用户提示词】
+        #   服务端那串在前、又含 `1.63::photorealistic::` 这类重权重 —— 结果就是
+        #   **用户换任何画师串 / 预设，画风都几乎不变**（被服务端的默认串压住）。
+        #   这正是「不管怎么切预设，出来都是一样的画风」的根因。
+        #
+        #   注意：本 fork 的 CHANGELOG v1.2.2 曾把「画师串单独走 artist 参数」判定为
+        #   「导致画风全部失效」而改回拼接 —— 那个判断是**错的**：服务端源码证明它从来
+        #   不会丢画师串（`[artist, tag].join('\n')`）。当年「张张都是上半身」的真正解药
+        #   是同一版加的 `auto_composition` + 构图词库，与「走 artist 参数」无关。
+        #
+        # 因此：`tag` 只放用户提示词；画师串（final_artist）单独进 `params["artist"]`。
+        # 顺序上 NovelAI 端仍是「画师串在前、用户提示词在后」，但那由**服务端** join 完成。
         final_prompt = prompt_body.strip()
-        if final_artist and final_artist.strip():
-            final_prompt = f"{final_artist.strip()}, {final_prompt}"
 
         params = {
             "token": self.token,
@@ -370,6 +382,10 @@ class Nai2ApiClient:
         }
         if final_negative:
             params["negative"] = final_negative
+        # 画师串走**独立的 artist 参数**（原因见上方长注释）。为空时不发该键 ——
+        # 与上游一致；此时服务端会退回它自己的默认画师串（见配置项 hint / README）。
+        if final_artist and final_artist.strip():
+            params["artist"] = final_artist.strip()
         if seed is not None:
             params["seed"] = str(seed)
 
@@ -380,12 +396,18 @@ class Nai2ApiClient:
             final_model, final_size, final_steps, final_scale, final_sampler,
         )
         if final_artist and final_artist.strip():
-            logger.info("[Nai2API] 画师串: %s", final_artist.strip())
+            logger.info("[Nai2API] 画师串（作为 artist 参数发送）: %s", final_artist.strip())
         if artist_negative:
             logger.info("[Nai2API] 画师串里的负权重已移入负面: %s", artist_negative)
         if composed:
             logger.info("[Nai2API] 未检测到构图标签，已补默认景别: %s", DEFAULT_COMPOSITION)
-        logger.info("[Nai2API] 提示词: %s", final_prompt)
+        # 这行是「本插件发出的 tag」—— **不含画师串**（画师串由 artist 参数单独发送）。
+        # 判断某个标签来源时：tag 里没有、最终成图里却有 → 只可能来自 artist 参数，
+        # 或是服务端在「本插件未发 artist」时又用它的默认画师串补了一串。见 v1.6.2 说明。
+        logger.info(
+            "[Nai2API] 提示词 tag（不含画师串，画师串由 artist 参数单独发送）: %s",
+            final_prompt,
+        )
         logger.debug("[Nai2API] 请求 URL: %s", url.replace(self.token, "***") if self.token else url)
 
         session = await self._get_session()

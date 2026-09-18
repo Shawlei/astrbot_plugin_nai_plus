@@ -815,7 +815,7 @@ check("asyncio.to_thread(_materialize_image" in _src,
 # ---------------------------------------------------------------------------
 # 13. v1.4.6：图生图不再静默丢弃画师串
 # ---------------------------------------------------------------------------
-# 背景：文生图会把画师串拼进提示词最前面（nai2api_client.py），但图生图分支
+# 背景：文生图会把画师串作为独立 artist 参数发送（nai2api_client.py），但图生图分支
 # 调用 img2img.generate() 时**压根没传 artist**，而 Img2ImgClient.generate()
 # 的签名里也没有这个参数 —— 于是用户一旦「回复带图的消息」发指令，画师串就
 # 无声失效，出的是渠道模型自己的风格，用户以为还是 NovelAI，完全无从排查。
@@ -1350,6 +1350,97 @@ _src_main = (ROOT / "main.py").read_text(encoding="utf-8")
 check("translated[:60]" not in _src_main and "prompt[:60]" not in _src_main,
       "直译日志不应再有 [:60] 静默截断")
 check("_PROMPT_LOG_LIMIT" in _src_main, "应使用 _PROMPT_LOG_LIMIT 常量约束日志长度")
+
+# ---------------------------------------------------------------------------
+# 17. v1.6.2：画师串必须走 artist 参数，不能拼进 tag
+# ---------------------------------------------------------------------------
+# 根因：Nai2API 服务端（server/providers.js）把
+#   `input.artist ?? 服务端默认画师串` 与 `input.tag` 用 '\n' join 后发给 NovelAI。
+# fork 之前不发 artist、而是把画师串拼进 tag，于是服务端每次都用自己的默认画师串
+# 打头 → 用户换任何画师串/预设画风几乎不变。本组断言截获 client 真正发出的请求参数。
+from urllib.parse import urlparse as _urlparse, parse_qs as _parse_qs  # noqa: E402
+
+
+class _FakeResp:
+    status = 200
+    headers = {"Content-Type": "image/png"}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def read(self):
+        return b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+    async def text(self):
+        return ""
+
+
+class _FakeSession:
+    def __init__(self, sink):
+        self._sink = sink
+
+    def get(self, url):
+        self._sink.append(url)
+        return _FakeResp()
+
+
+def _capture_params(**gen_kw):
+    """跑一次真实 client.generate()，截获它实际拼出的请求参数（parse_qs 成字典）。"""
+    client = _nc.Nai2ApiClient(
+        "http://nai.local", "TESTTOKEN", default_artist="", default_negative="",
+    )
+    sink: list[str] = []
+    orig = client._get_session
+
+    async def _fake_get_session():
+        return _FakeSession(sink)
+
+    client._get_session = _fake_get_session
+    try:
+        asyncio.run(client.generate(**gen_kw))
+    finally:
+        client._get_session = orig
+    q = _parse_qs(_urlparse(sink[0]).query)
+    return {k: v[0] for k, v in q.items()}
+
+
+# ① 画师串走 artist 参数；tag 里绝不含画师串
+_p1 = _capture_params(prompt="1girl, silver hair", artist="artist:foo, best quality")
+check(_p1.get("artist") == "artist:foo, best quality",
+      f"画师串必须作为独立 artist 参数发送: {_p1.get('artist')!r}")
+check("artist:foo" not in _p1.get("tag", ""),
+      f"tag 里绝不能含画师串（旧行为的根因）: {_p1.get('tag')!r}")
+check("1girl, silver hair" in _p1.get("tag", "") and "full body, standing" in _p1.get("tag", ""),
+      f"tag 应为（补过构图的）用户提示词: {_p1.get('tag')!r}")
+
+# ② 画师串里的负权重仍挪进 negative，artist 里不留负权重
+_p2 = _capture_params(prompt="1girl", artist="-2::green::, best quality")
+check("-2::green::" not in _p2.get("artist", ""),
+      f"artist 里不应含负权重: {_p2.get('artist')!r}")
+check("-2::green::" in _p2.get("negative", ""),
+      f"画师串里的负权重应挪进 negative: {_p2.get('negative')!r}")
+
+# ③ 画师串为空 / 未传（默认空）→ 不发送 artist 键
+_p3a = _capture_params(prompt="1girl", artist="")
+check("artist" not in _p3a, f"画师串为空时不应发送 artist 键: {_p3a.get('artist')!r}")
+_p3b = _capture_params(prompt="1girl")
+check("artist" not in _p3b, "未传画师串且默认空时不应发送 artist 键")
+
+# ④ 构图兜底仍读取画师串里的构图词：含 cowboy shot 时不再补 full body
+_p4 = _capture_params(prompt="1girl", artist="artist:foo, cowboy shot")
+check("full body, standing" not in _p4.get("tag", ""),
+      f"画师串含构图词时不应再补 full body（ensure_composition 仍读画师串）: {_p4.get('tag')!r}")
+check(_p4.get("artist") == "artist:foo, cowboy shot",
+      f"含构图词的画师串应原样作为 artist 发送: {_p4.get('artist')!r}")
+
+# ⑤ 源码级护栏：不再存在把画师串拼进 tag 的写法；且已恢复 params["artist"]
+_src_client = (ROOT / "core" / "nai2api_client.py").read_text(encoding="utf-8")
+check('f"{final_artist' not in _src_client and "f'{final_artist" not in _src_client,
+      "nai2api_client.py 不应再有 f\"{final_artist...}\" 拼进 tag 的写法")
+check('params["artist"]' in _src_client, '应恢复 params["artist"] 发送画师串')
 
 # ---------------------------------------------------------------------------
 # 汇总

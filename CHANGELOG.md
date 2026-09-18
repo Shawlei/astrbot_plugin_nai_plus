@@ -3,6 +3,67 @@
 > 说明：本仓库自 v1.0.0 起独立计数（原项目基于 helloWKQ/AstrBot_Nai2API 二开，
 > 早期内部迭代过 v1.2.0 / v1.3.x，为对接 AstrBot 插件市场，版本号从 1.0.0 重新开始）。
 
+## v1.6.2
+
+修一个**根本性**的 bug：**画师串（预设 / 全局）其实一直没真正生效** —— 被 Nai2API 服务端的默认画师串压在下面了。
+
+### 问题
+
+用户症状：**「不管我怎么切预设，出来都是一样的画风」**。
+
+### 根因（服务端源码证据）
+
+真正发给 NovelAI 的提示词，是 Nai2API **服务端**拼出来的。服务端 `server/providers.js`：
+
+```javascript
+const tag    = normalizePromptText(input.tag || input.prompt || '').trim();
+const artist = normalizePromptText(input.artist ?? settings.defaultArtist ?? '').trim();
+const prompt = [artist, tag].filter(Boolean).join('\n');
+```
+
+即 **`artist` 取 `input.artist`，取不到就退回服务端自己存的 `settings.defaultArtist`**（默认就是一串 2.5D 写实画师串），再与 `tag` 拼成最终提示词。
+
+而本 fork 的 `core/nai2api_client.py` **不发 `artist`**，把画师串拼进了 `tag`：
+
+```python
+"tag": final_prompt,        # ← 画师串被拼进了 tag
+# 没有 params["artist"] ！
+```
+
+两者叠加 → 服务端每次都拿**它自己的**默认画师串打头：
+
+```
+发给 NovelAI = 【服务端默认 2.5D 写实画师串】+ "\n" + 【用户的画师串, 用户提示词】
+```
+
+服务端那串在前、又含 `1.63::photorealistic::` / `20::best quality...::` 这类重权重 ——
+**所以用户换任何画师串 / 预设，画风都几乎不变。**
+
+> 历史更正：本 fork 的 CHANGELOG v1.2.2 曾把「画师串单独作为 artist 参数发送」判定为「导致画风全部失效」而改回拼接。**那个判断是错的** —— 服务端源码（上面那段）证明它会把 `[artist, tag].join('\n')`，从来没有丢画师串。当年「张张都是上半身」的真正解药，是同一版加的 `auto_composition` + 构图词库，与「走不走 artist 参数」无关。
+
+### 修复
+
+`core/nai2api_client.py` 恢复上游做法：
+
+- `tag` 只放用户提示词（`prompt_body.strip()`），不再拼画师串
+- 恢复 `params["artist"] = final_artist`（画师串非空时）
+- **保留** `split_negative_weights(final_artist)`：画师串里的 `-2::green::` 仍挪进 `negative`（服务端不会替我们做）
+- **保留** `ensure_composition(prompt, final_artist)`：画师串仍参与「有没有构图词」的判断，只是现在作用在 `prompt` 上
+- 删除 `final_prompt = f"{final_artist}, {prompt}"` 的拼接
+- 日志：`[Nai2API] 画师串（作为 artist 参数发送）: ...` 与 `[Nai2API] 提示词 tag（不含画师串…）: ...`，一眼能区分「插件到底发了什么」
+
+### 影响面（**重要**）
+
+- **升级后，画风会开始真正随预设 / 画师串变化** —— 这正是本次要修的。对「一直觉得换预设没用」的用户而言是**行为变更**，但不是回归，是修正
+- 若你此前其实「靠服务端默认串的画风」出图（本就没指望自己的画师串生效），升级后观感会变 —— 想复现旧观感，把画师串设成那串 2.5D 或选「2.5D唯美风」预设
+- **留空画师串 = 不发送 `artist`**，此时服务端仍会用它自己的默认画师串。想完全不被覆盖，需在 Nai2API 面板里清空服务端自己的画师串
+- 图生图路径（另一套渠道）不受影响
+
+### 测试
+
+- `tests/test_prompt_dict_quality.py` **7960/7960 通过**
+- `tests/test_webui_api.py` 289 → **300 项全过**（+11）：抓取 `client.generate()` 真正发出的请求参数（`parse_qs`）—— 断言 `params["artist"] == 画师串`、`params["tag"]` 不含画师串且为（补过构图的）用户提示词；画师串里的负权重仍进 `negative`、且不在 `artist` 里；画师串空 / 未传 → **不发送** `artist` 键；画师串含 `cowboy shot` 时不追加 `full body, standing`（`ensure_composition` 仍读画师串）；源码级护栏：`nai2api_client.py` 不再有 `f"{final_artist…"` 拼进 tag 的写法、且已恢复 `params["artist"]`
+
 ## v1.6.1
 
 一个纯**可观测性**补丁：修掉两处让「标签到底哪来的」根本无法排查的日志缺陷。
@@ -1065,6 +1126,11 @@ v1.2.2 修的是「画师串压根没拼进提示词」—— 那时画师串被
   当前 19 例中 13 例（68%）完全绕过模型，词元级命中率 84%。
 
 ## v1.2.2
+
+> ⚠️ **事后更正（v1.6.2）**：本节「画师串走独立 `artist` 参数会失效」的判断是**错的**。
+> Nai2API 服务端会把 `input.artist`（取不到才退回服务端默认）与 `tag` 用 `\n` join 后发给
+> NovelAI，画师串**从来不会丢**。v1.6.2 已把发送方式改回「独立的 `artist` 参数」。
+> 当年「张张都是上半身」的真正解药，是本节下方新增的 `auto_composition` + 构图词库。
 
 修两个让「画风完全不生效」的 bug，并加上质量词自动加权。
 

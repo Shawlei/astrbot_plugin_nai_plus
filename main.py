@@ -838,8 +838,10 @@ class Nai2ApiPlugin(Star):
         async def api_preview():
             """POST preview  {"prompt": "...", "artist": "...", "negative": "...", "preset": "..."}
 
-            把 nai2api_client.generate() 里的拼接逻辑原样跑一遍（不发请求），
-            让用户在面板里就能看到「最终发给 NovelAI 的到底是什么」。
+            模拟「最终发给 NovelAI 的提示词」（不发请求），让用户在面板里就能看到结果。
+            注意：v1.6.2 起插件把画师串作为**独立 artist 参数**发送，真正的
+            「画师串 + 用户提示词」拼接是 Nai2API 服务端做的（`[artist, tag].join('\n')`）；
+            这里为了直观，在本地先把两者拼成最终效果给你看。
             这是新手最常问的问题：改了画师串，到底拼到哪了？负权重去哪了？
 
             v1.4.2：可选传 preset（预设名）。传了就模拟 `/nai -p 预设名` 的效果：
@@ -1182,7 +1184,7 @@ class Nai2ApiPlugin(Star):
         """把预设附带的正向词 / 负向词并进本次生图的 prompt / negative。
 
         规则（和 preset_manager 顶部的说明一致）：
-            正向词 → 追加到用户提示词**后面**（画师串仍由 client 拼在最前）
+            正向词 → 追加到用户提示词**后面**（画师串仍作为独立 artist 参数发送，NovelAI 端在最前）
             负向词 → 追加到全局负向词（或用户 --negative 给的）后面
 
         为什么放在直译**之后**调用：预设正向词是用户自己写好的英文标签，

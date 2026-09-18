@@ -158,7 +158,8 @@ def ensure_composition(prompt: str, artist: str = "") -> tuple[str, bool]:
 #
 # 一个预设由三段可选内容组成，任意一段非空即可保存：
 #
-#   artist    画师串 / 质量前缀   → 拼在整条提示词**最前面**（全局风格）
+#   artist    画师串 / 质量前缀   → 作为独立 `artist` 参数发送（v1.6.2 起；
+#                                   NovelAI 端由服务端拼在提示词**最前面**，全局风格）
 #   positive  预设正向词          → 拼在用户提示词**后面**（每次都想带上的内容，
 #                                   比如 `full body, standing, soft lighting`）
 #   negative  预设负向词          → **追加**到全局负向词后面
