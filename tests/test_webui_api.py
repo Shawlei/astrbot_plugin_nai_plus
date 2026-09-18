@@ -1228,6 +1228,130 @@ check(_t3.last_stats.get("dict_unavailable") is True,
       f"应记下 dict_unavailable 标记: {_t3.last_stats!r}")
 
 # ---------------------------------------------------------------------------
+# 16. v1.6.1：可观测性补丁（直译日志不静默截断 + 预设附带词留痕）
+# ---------------------------------------------------------------------------
+# 背景：用户日志里 prompt 末尾凭空多出 `1girl, standing, cherry blossoms, ...`，
+# 分不清是「翻译模型脑补」还是「某预设的附带正向词」—— 因为直译日志被
+# `prompt[:60] → translated[:60]` **静默**砍断（读者看不出被砍过），且预设
+# 附带词拼入时**没有任何日志**。两处叠加，「标签哪来的」根本无法排查。
+_cfl = plugin_main._clip_for_log
+_LIM = plugin_main._PROMPT_LOG_LIMIT
+
+# (a) 截断助手：短文本原样，超长必留「共 N 字符」痕（关键在“看得出被截断”）
+check(_cfl("1girl, solo") == "1girl, solo", "_clip_for_log 应原样返回短文本")
+check(_cfl("") == "" and _cfl(None) == "", "_clip_for_log 空值应返回空串")
+check(_cfl("a" * _LIM) == "a" * _LIM, "_clip_for_log 恰好等于上限时不截断")
+_c = _cfl("b" * (_LIM + 37))
+check(_c.startswith("b" * _LIM) and f"共 {_LIM + 37} 字符" in _c and "…" in _c,
+      f"_clip_for_log 超长应截断并标出「共 N 字符」: {_c[-24:]!r}")
+
+
+class _CapLogger:
+    """捕获 logger.info 的调用，用来断言日志内容。"""
+
+    def __init__(self):
+        self.records: list[str] = []
+
+    def info(self, fmt, *a, **k):
+        self.records.append(fmt % a if a else fmt)
+
+    def warning(self, *a, **k):
+        pass
+
+    def error(self, *a, **k):
+        pass
+
+    def debug(self, *a, **k):
+        pass
+
+
+_orig_logger = plugin_main.logger
+
+
+def _with_capture(fn):
+    """把 main.logger 换成捕获器跑 fn，再还原；返回捕获到的 info 记录。"""
+    cap = _CapLogger()
+    plugin_main.logger = cap
+    try:
+        fn()
+    finally:
+        plugin_main.logger = _orig_logger
+    return cap.records
+
+
+class _FakeTranslator:
+    """只回固定结果的假翻译器，用来驱动 _translate_prompt 的日志分支。"""
+
+    def __init__(self, out):
+        self._out = out
+        self.last_stats: dict = {}
+
+    async def translate(self, _text):
+        return self._out
+
+
+_orig_translator = plugin.translator
+_orig_te = plugin._translate_enabled
+
+
+def _run_translate(inp, out):
+    plugin.translator = _FakeTranslator(out)
+    plugin._translate_enabled = True
+    try:
+        return _with_capture(lambda: asyncio.run(plugin._translate_prompt(inp, None)))
+    finally:
+        plugin.translator = _orig_translator
+        plugin._translate_enabled = _orig_te
+
+
+# (b) 直译日志必须能看到 60 字符之后的内容（输入侧与输出侧都放宽）
+_in_tail = "输入前缀" + "甲" * 70 + "_输入尾标"
+_out_tail = "HEAD_" + "x" * 70 + "_输出尾标"
+_recs_b = _run_translate(_in_tail, _out_tail)
+check(any("_输出尾标" in r for r in _recs_b),
+      f"直译日志应能看到 60 字符之后的翻译结果: {_recs_b!r}")
+check(any("_输入尾标" in r for r in _recs_b),
+      f"直译日志的输入侧也不应被砍到 60: {_recs_b!r}")
+
+# (c) 超长翻译应在日志里显式标出「共 N 字符」
+_len_long = _LIM + 200
+_recs_c = _run_translate("短输入", "L" * _len_long)
+check(any(f"共 {_len_long} 字符" in r for r in _recs_c),
+      f"超长翻译应在日志里标出「共 N 字符」: {_recs_c!r}")
+
+# (d) 预设带附带词时：日志里要有预设名 + 词内容（正向词、负向词各一条）
+# 自建一个专用预设，不依赖前面已被 delete 掉的「夜景」（见第 471 行的删除）
+call("POST", "presets", {"action": "add", "data": {
+    "name": "日志测试预设", "artist": "", "positive": "lens flare, bokeh", "negative": "jpeg artifacts",
+}})
+_recs_d = _with_capture(lambda: plugin._apply_preset_extras("日志测试预设", "1girl", None))
+check(any("预设「日志测试预设」附带正向词已拼入" in r and "lens flare, bokeh" in r for r in _recs_d),
+      f"预设附带正向词应留痕（含预设名与词内容）: {_recs_d!r}")
+check(any("预设「日志测试预设」附带负向词已拼入" in r and "jpeg artifacts" in r for r in _recs_d),
+      f"预设附带负向词应留痕: {_recs_d!r}")
+
+# (e) 预设没有附带词 → 不产生日志（防刷屏）
+_recs_e = _with_capture(lambda: plugin._apply_preset_extras("动漫风", "1girl", None))
+check(not any("附带" in r for r in _recs_e),
+      f"预设没有附带词时不应产生日志: {_recs_e!r}")
+
+# (f) preset_name=None / 预设不存在 → 早返回分支也不该记日志
+def _no_extras():
+    plugin._apply_preset_extras(None, "1girl", None)
+    plugin._apply_preset_extras("不存在", "1girl", None)
+
+
+_recs_f = _with_capture(_no_extras)
+check(not any("附带" in r for r in _recs_f),
+      f"preset_name=None / 预设不存在时不应产生附带词日志: {_recs_f!r}")
+
+# (g) 源码级护栏：直译日志不能再用 [:60] 静默截断
+_src_main = (ROOT / "main.py").read_text(encoding="utf-8")
+check("translated[:60]" not in _src_main and "prompt[:60]" not in _src_main,
+      "直译日志不应再有 [:60] 静默截断")
+check("_PROMPT_LOG_LIMIT" in _src_main, "应使用 _PROMPT_LOG_LIMIT 常量约束日志长度")
+
+# ---------------------------------------------------------------------------
 # 汇总
 # ---------------------------------------------------------------------------
 total = PASSED + len(FAILED)

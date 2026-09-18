@@ -112,6 +112,31 @@ _NEGATIVE_PATTERN = re.compile(
     rf'--negative\s+(.+?)(?=\s+(?:{_STOP_TOKENS})\s+|$)', re.DOTALL
 )
 
+# ---------------------------------------------------------------------------
+# 日志用截断（v1.6.1 可观测性）
+# ---------------------------------------------------------------------------
+# 背景：用户反馈「画不出我要的效果」，可排查「某个标签到底哪来的」时却被日志
+# 自己挡住了 —— 直译日志曾把输入与输出两段各砍到 60 字符，又**不加任何截断
+# 标记**，读者根本看不出被砍过，会误把它当成全部内容。日志的职责就是让人看清
+# 「到底发了什么」，绝不能静默截断。
+# 这里统一用一个足够大的上限：不够长原样输出，超出才截断并显式标出「共 N 字符」。
+_PROMPT_LOG_LIMIT = 1000
+
+
+def _clip_for_log(text: str, limit: int = _PROMPT_LOG_LIMIT) -> str:
+    """把可能过长的提示词/标签压成适合写日志的一行，**截断时必留痕**。
+
+    和 `_short_err` 的分工：`_short_err` 是给「异常信息」防刷屏用的；这里服务
+    的是「提示词内容」日志，目标是**看得清**而不是压缩，所以上限设得很大
+    （默认 1000 字符），且一旦截断就附上「…（共 N 字符）」—— 让人一眼知道
+    原文更长。相比之前那种不声不响的 `text[:60]`，宁可多打几百字也不能误导排查。
+    """
+    if not text:
+        return text or ""
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}…（共 {len(text)} 字符）"
+
 
 HELP_TEXT = (
     "用法: /{cmd} [尺寸] <提示词> [-p <预设>] [-m <模型>] [--artist <质量前缀>] [--negative <负面>] [--seed <种子>]\n"
@@ -950,7 +975,12 @@ class Nai2ApiPlugin(Star):
             translated = await self.translator.translate(prompt)
             if translated:
                 if translated.strip() != prompt.strip():
-                    logger.info("[Nai2API] 提示词已直译: %s → %s", prompt[:60], translated[:60])
+                    # v1.6.1：不再把两段各砍到 60 字符（那样看不出被截断，
+                    # 会误导排查）；改用足够大的上限 + 截断留痕。
+                    logger.info(
+                        "[Nai2API] 提示词已直译: %s → %s",
+                        _clip_for_log(prompt), _clip_for_log(translated),
+                    )
                 # 校验失败（翻完仍有中文）时提醒用户，但按配置决定是否继续
                 stats = getattr(self.translator, "last_stats", None) or {}
                 if stats.get("verify") == "failed":
@@ -1171,10 +1201,25 @@ class Nai2ApiPlugin(Star):
         extra_pos = entry.get("positive", "")
         extra_neg = entry.get("negative", "")
 
+        # v1.6.1：预设附带词拼入时**必须留痕**。否则用户日志里只看到 prompt
+        # 末尾凭空多出几个标签（如 1girl, standing, cherry blossoms...），
+        # 分不清是「翻译模型脑补的」还是「某个预设自带的」，排查无从下手。
+        # 日志加在本函数内部（两条调用链公用它），而不是两个调用点各写各的
+        # —— 后者正是本项目反复踩的坑（图生图画师串丢失、_effective_preset）。
+        # 没有附带词就不打日志，避免刷屏；preset_name 为空 / 预设不存在的
+        # 早返回分支也不会走到这里。
         if extra_pos:
+            logger.info(
+                "[Nai2API] 预设「%s」附带正向词已拼入: %s",
+                preset_name, _clip_for_log(extra_pos),
+            )
             prompt = merge_tags(prompt, extra_pos)
         if extra_neg:
             base_neg = negative if negative is not None else (self.client.default_negative or "")
+            logger.info(
+                "[Nai2API] 预设「%s」附带负向词已拼入: %s",
+                preset_name, _clip_for_log(extra_neg),
+            )
             negative = merge_tags(base_neg, extra_neg)
         return prompt, negative
 
