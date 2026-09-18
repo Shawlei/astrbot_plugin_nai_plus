@@ -62,11 +62,12 @@ class ImageManager:
 
         return await self.save_image(data)
 
-    async def save_image(self, data: bytes) -> Path:
+    async def save_image(self, data: bytes, *, prefix: str = "", **kwargs) -> Path:
         """保存图片 bytes 到本地"""
         # 根据文件头判断扩展名
         ext = _guess_ext(data)
-        filename = f"{int(time.time())}_{id(data) % 100000}.{ext}"
+        prefix_str = f"{prefix}_" if prefix else ""
+        filename = f"{prefix_str}{int(time.time())}_{id(data) % 100000}.{ext}"
         path = self.image_dir / filename
 
         async with aiofiles.open(path, "wb") as f:

@@ -391,6 +391,19 @@ class TestWebUIApiEndpoints(unittest.IsolatedAsyncioTestCase):
         self.assertIn("lowres", result["negative"])
         self.assertIn("photorealistic", result["negative"])
 
+    async def test_do_generate_and_save_image(self):
+        # Mock client generate returning dummy PNG bytes
+        fake_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        self.plugin.client.generate = AsyncMock(return_value=fake_png)
+
+        # Call _do_generate
+        path = await self.plugin._do_generate("1girl, smiling", size="竖图", artist="1.2::artist:test::")
+        self.assertTrue(path.exists())
+        self.assertEqual(path.suffix, ".png")
+        self.assertEqual(path.read_bytes(), fake_png)
+        # Clean up
+        path.unlink(missing_ok=True)
+
 
 class TestCommandParsingAndResolution(unittest.TestCase):
     """Test command flag parsing and default preset resolution."""

@@ -1,5 +1,12 @@
 # 更新日志
 
+## v0.1.2 (2026-09-18)
+
+- **修复生图完成后的图片保存异常**：
+  - 修复 `main.py::_do_generate` 中调用 `ImageManager.save_image()` 时误传 `prompt=prompt` 导致 `unexpected keyword argument 'prompt'` 的缺陷。
+  - 修复 `save_image()` 未使用 `await` 异步等待的问题。
+  - `ImageManager.save_image()` 签名增加 `**kwargs` 兼容，防止任何未声明的关键字传参报错。
+
 ## v0.1.1 (2026-09-18)
 
 - **修复 WebUI 面板 Bridge 通信与路由问题**：

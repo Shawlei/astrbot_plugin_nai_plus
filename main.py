@@ -403,7 +403,7 @@ class Nai2ApiPlugin(Star):
         image_bytes = await self.client.generate(
             prompt, size=size, artist=artist, negative=negative, seed=seed
         )
-        return self.imgr.save_image(image_bytes, prompt=prompt)
+        return await self.imgr.save_image(image_bytes)
 
     # -----------------------------------------------------------------------
     # /nai 指令分发
