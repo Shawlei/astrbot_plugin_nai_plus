@@ -79,12 +79,24 @@ git clone https://github.com/Shawlei/astrbot_plugin_nai_plus.git
 /nai default                    # 查看当前默认预设
 /nai default <预设名>            # 将指定预设设为默认（免写 -p）
 /nai default clear              # 取消默认预设
+/nai -p <预设名>                # 单独发送亦可直接将该预设设为默认
 /nai save <预设名> <画师串>      # 新建或覆盖自定义预设
 /nai del <预设名>               # 删除自定义预设
 /nai update <预设名> <画师串>    # 修改自定义预设
 ```
+> 注：指令中的 `<预设名>` 为占位符说明，实际使用时直接输入名称即可（如 `/nai -p 动漫风 1girl`）；即使误带了 `<>`、`《》` 或引号，插件也会自动清洗识别。
 
-### 3. 余额查询
+### 3. 模型切换与查询
+
+```text
+/nai model                      # 查询当前默认生图模型及常用切换列表
+/nai model 5                    # 切换默认模型为 NovelAI V5 Full（5点/张）
+/nai model 5c                   # 切换默认模型为 NovelAI V5 Curated（5点/张）
+/nai model 4.5                  # 切换默认模型为 NovelAI V4.5（1点/张）
+/nai -m 5                       # 单独发送 -m 亦可直接切换默认模型
+```
+
+### 4. 余额查询
 
 ```text
 /nai balance                    # 查询当前点数与各分辨率预计可生成张数
@@ -95,7 +107,7 @@ git clone https://github.com/Shawlei/astrbot_plugin_nai_plus.git
 ```text
 astrbot_plugin_nai_plus/
 ├── main.py                     # 插件入口，注册指令、LLM 工具与 WebAPI
-├── metadata.yaml               # 插件元信息（版本 0.2.0）
+├── metadata.yaml               # 插件元信息（版本 0.2.1）
 ├── _conf_schema.json           # 插件配置项 Schema 定义（含 template_list）
 ├── requirements.txt            # Python 依赖清单
 ├── README.md                   # 仓库说明文档

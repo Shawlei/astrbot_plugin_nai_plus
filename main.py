@@ -44,12 +44,26 @@ _SIZE_PATTERN = re.compile(
     r'^(2K竖图|2K横图|2K方图|4K竖图|4K横图|4K方图|竖图|横图|方图)\s+',
     re.IGNORECASE,
 )
-_MODEL_PATTERN = re.compile(r'(?:-m|--model)\s+([a-zA-Z0-9_.\-]+)', re.IGNORECASE)
+_MODEL_PATTERN = re.compile(r'(?:-m|--model)\s+(\S+)', re.IGNORECASE)
 _PRESET_PATTERN = re.compile(r'(?:-p|--preset)\s+(\S+)', re.IGNORECASE)
 _SEED_PATTERN = re.compile(r'--seed\s+(\d+)', re.IGNORECASE)
 _ARTIST_PATTERN = re.compile(r'--artist\s+(.+?)(?=\s+(?:--negative|-p|--preset|-m|--model|--seed|--no-preset)\s+|$)', re.DOTALL)
 _NEGATIVE_PATTERN = re.compile(r'--negative\s+(.+?)(?=\s+(?:--artist|-p|--preset|-m|--model|--seed|--no-preset)\s+|$)', re.DOTALL)
 _NO_PRESET_PATTERN = re.compile(r'--no-preset\b', re.IGNORECASE)
+
+
+def _clean_param_val(val: str | None) -> str | None:
+    """清理用户可能误输入的尖括号、书名号、引号及末尾逗号等标点。"""
+    if not val:
+        return None
+    val = val.strip()
+    # 移除外层包裹符号: < >, 《 》, 【 】, ", '
+    for l_bracket, r_bracket in (("<", ">"), ("《", "》"), ("【", "】"), ('"', '"'), ("'", "'")):
+        if val.startswith(l_bracket) and val.endswith(r_bracket):
+            val = val[len(l_bracket):-len(r_bracket)].strip()
+    # 移除末尾逗号或分号（例如 `-p 动漫风, 1girl` 或 `-m 5, 1girl`）
+    val = val.rstrip(",，.。;；")
+    return val.strip() or None
 
 
 def _parse_nai_command(text: str) -> tuple[str | None, str, str | None, str | None, str | None, int | None, bool, str | None]:
@@ -81,14 +95,15 @@ def _parse_nai_command(text: str) -> tuple[str | None, str, str | None, str | No
     model = None
     m = _MODEL_PATTERN.search(text)
     if m:
-        model = resolve_model_alias(m.group(1).strip())
+        raw_m = _clean_param_val(m.group(1))
+        model = resolve_model_alias(raw_m) if raw_m else None
         text = text[:m.start()] + text[m.end():]
 
     # 提取预设名
     preset_name = None
     m = _PRESET_PATTERN.search(text)
     if m:
-        preset_name = m.group(1)
+        preset_name = _clean_param_val(m.group(1))
         text = text[:m.start()] + text[m.end():]
 
     # 提取种子
@@ -454,6 +469,23 @@ class Nai2ApiPlugin(Star):
         elif text.startswith("default") or text.startswith("默认"):
             sub = text[len("default"):].strip() if text.startswith("default") else text[len("默认"):].strip()
             return await self._handle_default_preset_cmd(event, sub)
+        elif text.startswith("model") or text.startswith("模型"):
+            sub = text[len("model"):].strip() if text.startswith("model") else text[len("模型"):].strip()
+            return await self._handle_model_cmd(event, sub)
+        elif text.startswith("-m ") or text.startswith("--model "):
+            # 用户可能把 -m 当成单独切换模型的命令（如 /nai -m 5）
+            sub_raw = text[len("-m "):].strip() if text.startswith("-m ") else text[len("--model "):].strip()
+            parts = sub_raw.split(None, 1)
+            if len(parts) == 1:
+                return await self._handle_model_cmd(event, parts[0])
+            return await self._handle_generate(event, text)
+        elif text.startswith("-p ") or text.startswith("--preset "):
+            # 用户可能把 -p 当成单独切换预设的命令（如 /nai -p 动漫风）
+            sub_raw = text[len("-p "):].strip() if text.startswith("-p ") else text[len("--preset "):].strip()
+            parts = sub_raw.split(None, 1)
+            if len(parts) == 1:
+                return await self._handle_default_preset_cmd(event, parts[0])
+            return await self._handle_generate(event, text)
         elif text.startswith("save") or text.startswith("保存"):
             sub = text[len("save"):].strip() if text.startswith("save") else text[len("保存"):].strip()
             return await self._handle_save_preset(event, sub)
@@ -500,7 +532,34 @@ class Nai2ApiPlugin(Star):
         size, prompt, preset_name, artist, negative, seed, no_preset, model = _parse_nai_command(args)
 
         if not prompt:
-            return event.plain_result("提示词不能为空")
+            # 智能拦截与引导：用户可能只输入了参数而漏掉了提示词
+            if preset_name and not model:
+                entry = self.presets.get_entry(preset_name)
+                if entry is not None:
+                    return event.plain_result(
+                        f"已识别到预设【{preset_name}】。\n"
+                        f"• 若要以此预设单次生图，请在后面加上提示词，例如：\n"
+                        f"  /nai -p {preset_name} 1girl, silver hair\n"
+                        f"• 若要将此预设设为默认（后续生图免写 -p），请发送：\n"
+                        f"  /nai default {preset_name}"
+                    )
+                else:
+                    return event.plain_result(f"预设 '{preset_name}' 不存在，请发送 /nai presets 查看可用预设")
+            elif model and not preset_name:
+                model_name = "V5 (nai-diffusion-5-full)" if "5-full" in model else ("V5 Curated" if "curated" in model else model)
+                return event.plain_result(
+                    f"已识别到模型【{model_name}】。\n"
+                    f"• 若要以此模型生图，请在后面加上提示词，例如：\n"
+                    f"  /nai -m 5 1girl, silver hair\n"
+                    f"• 若要将全局默认模型切换为该模型，请发送：\n"
+                    f"  /nai model 5"
+                )
+            elif preset_name and model:
+                return event.plain_result(
+                    f"已识别到模型与预设，但未提供图片提示词。\n"
+                    f"生图示例：/nai -m 5 -p {preset_name} 1girl, white dress"
+                )
+            return event.plain_result("提示词不能为空。请在指令中输入图片描述，例如：/nai 1girl, silver hair")
 
         # 确定生效预设：--no-preset 强制不使用任何预设；否则优先指令 -p，其次默认预设
         effective_preset = None if no_preset else (preset_name or self._default_preset or None)
@@ -543,7 +602,7 @@ class Nai2ApiPlugin(Star):
             logger.error("[Nai2API] 生图失败: %s", e)
             if self._show_image_info:
                 elapsed = time.time() - start
-                reason = str(e)[:30] if str(e) else "未知错误"
+                reason = str(e)[:100] if str(e) else "未知错误"
                 model_tag = f" | {model}" if model else ""
                 info_text = f"{effective_preset or '默认'}{model_tag} | 耗时{int(elapsed)}秒\n失败原因：{reason}"
                 return event.plain_result(info_text)
@@ -551,11 +610,11 @@ class Nai2ApiPlugin(Star):
 
     async def _handle_default_preset_cmd(self, event: AstrMessageEvent, sub: str):
         """设置或查询默认预设"""
-        sub = sub.strip()
+        sub = _clean_param_val(sub) or ""
         if not sub:
             if self._default_preset:
                 return event.plain_result(f"当前默认预设: 【{self._default_preset}】（每次生图未加 -p 时自动套用）")
-            return event.plain_result("当前未设置默认预设。用法: /nai default <预设名> 或在 WebUI 面板中点击「设为默认」")
+            return event.plain_result("当前未设置默认预设。用法: /nai default 预设名 或在 WebUI 面板中点击「设为默认」")
 
         if sub in ("cancel", "clear", "none", "取消", "关闭"):
             await self._save_plugin_config({"default_preset": ""})
@@ -568,6 +627,35 @@ class Nai2ApiPlugin(Star):
         await self._save_plugin_config({"default_preset": sub})
         self._default_preset = sub
         return event.plain_result(f"已将【{sub}】设为默认预设！每次生图未加 -p 时将自动套用其风格。")
+
+    async def _handle_model_cmd(self, event: AstrMessageEvent, sub: str):
+        """查询或切换默认生图模型"""
+        sub = _clean_param_val(sub) or ""
+        if not sub:
+            curr_model = self.client.default_model
+            model_disp = "V5 Full (nai-diffusion-5-full)" if "5-full" in curr_model else ("V5 Curated (nai-diffusion-5-curated)" if "curated" in curr_model else curr_model)
+            lines = [
+                f"当前默认模型: 【{model_disp}】",
+                "",
+                "常用模型切换命令:",
+                "  /nai model 5        → 切换为 NovelAI V5 Full (5点/张，高精二次元)",
+                "  /nai model 5c       → 切换为 NovelAI V5 Curated (5点/张，纯净版)",
+                "  /nai model 4.5      → 切换为 NovelAI V4.5 (1点/张，经典版)",
+                "  /nai model 4        → 切换为 NovelAI V4 (1点/张)",
+                "  /nai model 3        → 切换为 NovelAI V3 (1点/张)",
+                "",
+                "单次临时生图示例: /nai -m 5 1girl, silver hair"
+            ]
+            return event.plain_result("\n".join(lines))
+
+        resolved = resolve_model_alias(sub)
+        if not resolved:
+            return event.plain_result(f"未知模型标识 '{sub}'，常用可选: 5 (V5), 5c (V5 Curated), 4.5, 4, 3 等")
+
+        await self._save_plugin_config({"default_model": resolved})
+        self.client.default_model = resolved
+        model_disp = "V5 Full (nai-diffusion-5-full)" if "5-full" in resolved else ("V5 Curated (nai-diffusion-5-curated)" if "curated" in resolved else resolved)
+        return event.plain_result(f"已将默认生图模型切换为: 【{model_disp}】！后续生图未加 -m 时将默认使用该模型。")
 
     async def _handle_balance(self, event: AstrMessageEvent):
         """查询 Nai2API 余额"""

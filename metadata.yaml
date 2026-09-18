@@ -4,7 +4,7 @@ desc: >
   通过 Nai2API 网关调用 NovelAI 生成图片，支持文生图指令和 LLM 工具调用。
   支持 NovelAI V5 双模型（V5 Full / V5 Curated）与指令快速切换。
   内置独立的 WebUI 预设管理面板（质量词/画师串、正向词、负向词三段式可视化编辑与默认预设配置）。
-version: 0.2.0
+version: 0.2.1
 author: Shawlei
 astrbot_version: ">=4.26.0,<5"
 repo: https://github.com/Shawlei/astrbot_plugin_nai_plus

@@ -35,12 +35,16 @@ class DummyStar:
     def __init__(self, context=None):
         self.context = context
 
+mock_filter = MagicMock()
+mock_filter.command = lambda *a, **k: (lambda fn: fn)
+mock_filter.command_group = lambda *a, **k: (lambda fn: fn)
+
 mock_astrbot = MagicMock()
 mock_astrbot.api = MagicMock()
 mock_astrbot.api.logger = MagicMock()
 mock_astrbot.api.event = MagicMock()
 mock_astrbot.api.event.AstrMessageEvent = MagicMock
-mock_astrbot.api.event.filter = MagicMock()
+mock_astrbot.api.event.filter = mock_filter
 mock_astrbot.api.message_components = MagicMock()
 mock_astrbot.api.message_components.Node = MagicMock
 mock_astrbot.api.message_components.Plain = MagicMock
@@ -55,8 +59,8 @@ mock_astrbot.api.web.json_response = lambda data: data
 mock_astrbot.api.web.request = MagicMock()
 mock_astrbot.core = MagicMock()
 mock_astrbot.core.star = MagicMock()
-mock_astrbot.core.star.filter = MagicMock()
-mock_astrbot.core.star.filter.command = MagicMock()
+mock_astrbot.core.star.filter = mock_filter
+mock_astrbot.core.star.filter.command = mock_filter.command
 mock_astrbot.core.star.filter.command.GreedyStr = str
 
 sys.modules["astrbot"] = mock_astrbot
@@ -465,6 +469,121 @@ class TestCommandParsingAndResolution(unittest.TestCase):
         self.assertEqual(neg, "bad hands")
         self.assertEqual(preset_name, "动漫风")
         self.assertEqual(prompt, "1girl")
+
+    def test_clean_param_val_and_angle_brackets(self):
+        from astrbot_plugin_nai_plus.main import _clean_param_val
+
+        # Direct cleaner tests
+        self.assertEqual(_clean_param_val("<5>"), "5")
+        self.assertEqual(_clean_param_val("<动漫风>"), "动漫风")
+        self.assertEqual(_clean_param_val("《动漫风》"), "动漫风")
+        self.assertEqual(_clean_param_val("【动漫风】"), "动漫风")
+        self.assertEqual(_clean_param_val('"动漫风"'), "动漫风")
+        self.assertEqual(_clean_param_val("'动漫风'"), "动漫风")
+        self.assertEqual(_clean_param_val("动漫风,"), "动漫风")
+        self.assertEqual(_clean_param_val("5，"), "5")
+        self.assertIsNone(_clean_param_val(None))
+        self.assertIsNone(_clean_param_val(""))
+        self.assertIsNone(_clean_param_val("  "))
+
+        # Parsing with angle brackets in -m and -p
+        size, prompt, preset_name, artist, neg, seed, no_preset, model = self.parse(
+            "1girl -m <5>"
+        )
+        self.assertEqual(model, "nai-diffusion-5-full")
+        self.assertEqual(prompt, "1girl")
+
+        size, prompt, preset_name, artist, neg, seed, no_preset, model = self.parse(
+            "1girl -p <动漫风>"
+        )
+        self.assertEqual(preset_name, "动漫风")
+        self.assertEqual(prompt, "1girl")
+
+        size, prompt, preset_name, artist, neg, seed, no_preset, model = self.parse(
+            "1girl -m <5c> -p 《像素风》"
+        )
+        self.assertEqual(model, "nai-diffusion-5-curated")
+        self.assertEqual(preset_name, "像素风")
+        self.assertEqual(prompt, "1girl")
+
+
+class TestStandaloneCommandsAndGuidance(unittest.IsolatedAsyncioTestCase):
+    """Test standalone -m / -p / model commands and prompt guidance."""
+
+    async def test_standalone_commands_and_guidance(self):
+        from astrbot_plugin_nai_plus.main import Nai2ApiPlugin
+
+        # Create plugin instance
+        mock_context = MagicMock()
+        mock_context.register_web_api = mock_register_web_api
+        data_dir = PLUGIN_ROOT / "tests" / "tmp_data_cmd"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        mock_astrbot.api.star.StarTools.get_data_dir.return_value = data_dir
+
+        config = {
+            "token": "dummy",
+            "server_url": "http://127.0.0.1:8000",
+            "default_preset": "",
+            "default_model": "nai-diffusion-4-5-full",
+            "presets": [
+                {
+                    "name": "动漫风",
+                    "artist": "1.2::artist:test::",
+                    "positive": "masterpiece",
+                    "negative": "lowres",
+                }
+            ],
+        }
+        plugin = Nai2ApiPlugin(mock_context, config)
+
+        # Helper to create mock event
+        def make_event():
+            event = MagicMock()
+            event.plain_result = lambda text: text
+            return event
+
+        # 1. Standalone /nai -m 5 -> switches default model
+        res = await plugin.nai_cmd(make_event(), "-m 5")
+        self.assertIn("已将默认生图模型切换为", res)
+        self.assertEqual(plugin.client.default_model, "nai-diffusion-5-full")
+
+        # 2. Standalone /nai model 5c -> switches default model to curated
+        res = await plugin.nai_cmd(make_event(), "model 5c")
+        self.assertIn("已将默认生图模型切换为", res)
+        self.assertEqual(plugin.client.default_model, "nai-diffusion-5-curated")
+
+        # 3. /nai model (no arg) -> shows current model and switch guide
+        res = await plugin.nai_cmd(make_event(), "model")
+        self.assertIn("当前默认模型", res)
+        self.assertIn("/nai model 5", res)
+
+        # 4. Standalone /nai -p 动漫风 -> switches default preset
+        res = await plugin.nai_cmd(make_event(), "-p 动漫风")
+        self.assertIn("已将【动漫风】设为默认预设", res)
+        self.assertEqual(plugin._default_preset, "动漫风")
+
+        # 5. /nai default 动漫风 -> switches default preset
+        res = await plugin.nai_cmd(make_event(), "default 动漫风")
+        self.assertIn("已将【动漫风】设为默认预设", res)
+
+        # 6. /nai default <动漫风> -> cleans angle brackets
+        res = await plugin.nai_cmd(make_event(), "default <动漫风>")
+        self.assertIn("已将【动漫风】设为默认预设", res)
+
+        # 7. Empty prompt guidance in _handle_generate
+        res = await plugin._handle_generate(make_event(), "-p 动漫风")
+        self.assertIn("已识别到预设【动漫风】", res)
+        self.assertIn("若要以此预设单次生图", res)
+
+        res = await plugin._handle_generate(make_event(), "-m 5")
+        self.assertIn("已识别到模型", res)
+        self.assertIn("若要以此模型生图", res)
+
+        # Clean up
+        import shutil
+        if data_dir.exists():
+            shutil.rmtree(data_dir, ignore_errors=True)
+
 
 
 class TestModelResolutionAndV5Detection(unittest.TestCase):
