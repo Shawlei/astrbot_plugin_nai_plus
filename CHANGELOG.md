@@ -1,5 +1,20 @@
 # 更新日志
 
+## v0.2.0 (2026-09-18)
+
+- **支持 NovelAI V5 双模型**：
+  - 新增 `nai-diffusion-5-full` (NovelAI Diffusion V5 Full) 和 `nai-diffusion-5-curated` (NovelAI Diffusion V5 Curated) 支持。
+  - 在配置项 `default_model` 中将 V5 双模型排在最前，并在配置提示中说明其二次元细节与自然语言支持特性。
+- **指令 `-m` / `--model` 快速切换模型**：
+  - `/nai` 指令增加 `-m` / `--model` 参数支持，支持使用别名快速指定生图模型（如 `-m 5`、`-m 5c`、`-m 4.5`、`-m furry` 等）。
+  - 提供 `MODEL_ALIASES` 字典与 `resolve_model_alias()` 解析函数，智能映射模型简写与全称。
+  - 提供 `is_v5_model()` 判断模型是否属于 V5 架构。
+- **LLM 生图工具扩展**：
+  - `nai_generate_tool` 增加 `model` 参数，支持大模型在调用生图工具时指定所用模型。
+- **生图信息与扣点提示**：
+  - 生图信息标签中增加当前所用模型标识（如使用 V5 或显式指定模型时提示）。
+  - `/nai balance` 余额查询中增加 V4.5 (1点/张) 与 V5 (5点/张) 普通尺寸预计可生成张数区别说明。
+
 ## v0.1.2 (2026-09-18)
 
 - **修复生图完成后的图片保存异常**：

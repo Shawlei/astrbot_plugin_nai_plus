@@ -14,9 +14,18 @@
   },
   "default_model": {
     "description": "默认模型",
-    "hint": "NovelAI 模型名称",
+    "hint": "NovelAI 模型名称。V5 (5-full / 5-curated) 支持极高二次元细节与自然语言提示，普通尺寸消耗 5 点；V4.5 / V4 消耗 1 点",
     "type": "string",
-    "options": ["nai-diffusion-4-5-full", "nai-diffusion-4-full", "nai-diffusion-3", "nai-diffusion-furry-3", "nai-diffusion-2", "safe-diffusion"],
+    "options": [
+      "nai-diffusion-5-full",
+      "nai-diffusion-5-curated",
+      "nai-diffusion-4-5-full",
+      "nai-diffusion-4-full",
+      "nai-diffusion-3",
+      "nai-diffusion-furry-3",
+      "nai-diffusion-2",
+      "safe-diffusion"
+    ],
     "default": "nai-diffusion-4-5-full"
   },
   "default_size": {

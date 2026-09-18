@@ -57,6 +57,69 @@ DEFAULT_NEGATIVE = (
 )
 
 
+# NovelAI V5 模型常量
+MODEL_V5_FULL = "nai-diffusion-5-full"
+MODEL_V5_CURATED = "nai-diffusion-5-curated"
+V5_MODELS = {MODEL_V5_FULL, MODEL_V5_CURATED}
+
+# 模型别名映射表
+MODEL_ALIASES: dict[str, str] = {
+    # V5 Full
+    "5": MODEL_V5_FULL,
+    "v5": MODEL_V5_FULL,
+    "5full": MODEL_V5_FULL,
+    "5-full": MODEL_V5_FULL,
+    "v5full": MODEL_V5_FULL,
+    "v5-full": MODEL_V5_FULL,
+    "nai-diffusion-5-full": MODEL_V5_FULL,
+    # V5 Curated
+    "5c": MODEL_V5_CURATED,
+    "v5c": MODEL_V5_CURATED,
+    "5curated": MODEL_V5_CURATED,
+    "5-curated": MODEL_V5_CURATED,
+    "v5curated": MODEL_V5_CURATED,
+    "v5-curated": MODEL_V5_CURATED,
+    "nai-diffusion-5-curated": MODEL_V5_CURATED,
+    # V4.5 & V4
+    "4.5": "nai-diffusion-4-5-full",
+    "v4.5": "nai-diffusion-4-5-full",
+    "4-5": "nai-diffusion-4-5-full",
+    "v4-5": "nai-diffusion-4-5-full",
+    "nai-diffusion-4-5-full": "nai-diffusion-4-5-full",
+    "4": "nai-diffusion-4-full",
+    "v4": "nai-diffusion-4-full",
+    "nai-diffusion-4-full": "nai-diffusion-4-full",
+    # V3 & others
+    "3": "nai-diffusion-3",
+    "v3": "nai-diffusion-3",
+    "nai-diffusion-3": "nai-diffusion-3",
+    "furry": "nai-diffusion-furry-3",
+    "furry-3": "nai-diffusion-furry-3",
+    "nai-diffusion-furry-3": "nai-diffusion-furry-3",
+    "2": "nai-diffusion-2",
+    "v2": "nai-diffusion-2",
+    "nai-diffusion-2": "nai-diffusion-2",
+    "safe": "safe-diffusion",
+    "safe-diffusion": "safe-diffusion",
+}
+
+
+def resolve_model_alias(value: str | None) -> str | None:
+    """将模型别名（如 '5', 'v5', '5c', '4.5' 等）解析为全称"""
+    if not value:
+        return None
+    val = str(value).strip().lower()
+    return MODEL_ALIASES.get(val, value.strip())
+
+
+def is_v5_model(model: str | None) -> bool:
+    """判断是否为 NovelAI V5 模型"""
+    if not model:
+        return False
+    resolved = resolve_model_alias(model) or model
+    return resolved in V5_MODELS
+
+
 class Nai2ApiClient:
     """Nai2API 图片生成客户端"""
 
@@ -174,7 +237,8 @@ class Nai2ApiClient:
             raise ValueError("提示词不能为空")
 
         final_size = self._normalize_size(size)
-        final_model = model or self.default_model
+        raw_model = model or self.default_model
+        final_model = resolve_model_alias(raw_model) or raw_model
         final_steps = steps if steps is not None else self.default_steps
         final_scale = scale if scale is not None else self.default_scale
         final_cfg = cfg if cfg is not None else self.default_cfg

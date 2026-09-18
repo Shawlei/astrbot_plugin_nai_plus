@@ -19,7 +19,16 @@ from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.star.filter.command import GreedyStr
 
 from .core.image_manager import ImageManager
-from .core.nai2api_client import Nai2ApiClient, DEFAULT_ARTIST, DEFAULT_NEGATIVE
+from .core.nai2api_client import (
+    Nai2ApiClient,
+    DEFAULT_ARTIST,
+    DEFAULT_NEGATIVE,
+    MODEL_V5_FULL,
+    MODEL_V5_CURATED,
+    V5_MODELS,
+    is_v5_model,
+    resolve_model_alias,
+)
 from .core.preset_manager import (
     BUILTIN_PRESETS,
     PresetManager,
@@ -30,26 +39,27 @@ from .core.preset_manager import (
 
 PLUGIN_NAME = "astrbot_plugin_nai_plus"
 
-# 解析用户输入中的尺寸前缀、-p/--preset、--artist、--negative、--seed 与 --no-preset 参数
+# 解析用户输入中的尺寸前缀、-m/--model、-p/--preset、--artist、--negative、--seed 与 --no-preset 参数
 _SIZE_PATTERN = re.compile(
     r'^(2K竖图|2K横图|2K方图|4K竖图|4K横图|4K方图|竖图|横图|方图)\s+',
     re.IGNORECASE,
 )
+_MODEL_PATTERN = re.compile(r'(?:-m|--model)\s+([a-zA-Z0-9_.\-]+)', re.IGNORECASE)
 _PRESET_PATTERN = re.compile(r'(?:-p|--preset)\s+(\S+)', re.IGNORECASE)
 _SEED_PATTERN = re.compile(r'--seed\s+(\d+)', re.IGNORECASE)
-_ARTIST_PATTERN = re.compile(r'--artist\s+(.+?)(?=\s+(?:--negative|-p|--preset|--seed|--no-preset)\s+|$)', re.DOTALL)
-_NEGATIVE_PATTERN = re.compile(r'--negative\s+(.+?)(?=\s+(?:--artist|-p|--preset|--seed|--no-preset)\s+|$)', re.DOTALL)
+_ARTIST_PATTERN = re.compile(r'--artist\s+(.+?)(?=\s+(?:--negative|-p|--preset|-m|--model|--seed|--no-preset)\s+|$)', re.DOTALL)
+_NEGATIVE_PATTERN = re.compile(r'--negative\s+(.+?)(?=\s+(?:--artist|-p|--preset|-m|--model|--seed|--no-preset)\s+|$)', re.DOTALL)
 _NO_PRESET_PATTERN = re.compile(r'--no-preset\b', re.IGNORECASE)
 
 
-def _parse_nai_command(text: str) -> tuple[str | None, str, str | None, str | None, str | None, int | None, bool]:
+def _parse_nai_command(text: str) -> tuple[str | None, str, str | None, str | None, str | None, int | None, bool, str | None]:
     """
     解析 /nai 指令的参数。
 
-    格式: /nai [尺寸] <提示词> [-p <预设>] [--artist <质量前缀>] [--negative <负面提示词>] [--seed <种子>] [--no-preset]
+    格式: /nai [尺寸] <提示词> [-m <模型>] [-p <预设>] [--artist <质量前缀>] [--negative <负面提示词>] [--seed <种子>] [--no-preset]
 
     Returns:
-        (size, prompt, preset_name, artist, negative, seed, no_preset)
+        (size, prompt, preset_name, artist, negative, seed, no_preset, model)
     """
     text = text.strip()
     size = None
@@ -65,6 +75,13 @@ def _parse_nai_command(text: str) -> tuple[str | None, str, str | None, str | No
     m = _NO_PRESET_PATTERN.search(text)
     if m:
         no_preset = True
+        text = text[:m.start()] + text[m.end():]
+
+    # 提取 -m / --model
+    model = None
+    m = _MODEL_PATTERN.search(text)
+    if m:
+        model = resolve_model_alias(m.group(1).strip())
         text = text[:m.start()] + text[m.end():]
 
     # 提取预设名
@@ -96,7 +113,7 @@ def _parse_nai_command(text: str) -> tuple[str | None, str, str | None, str | No
         text = text[:m.start()] + text[m.end():]
 
     prompt = text.strip()
-    return size, prompt, preset_name, artist, negative, seed, no_preset
+    return size, prompt, preset_name, artist, negative, seed, no_preset, model
 
 
 class Nai2ApiPlugin(Star):
@@ -384,11 +401,26 @@ class Nai2ApiPlugin(Star):
         )
         return event.chain_result([node])
 
-    async def _send_image_with_info(self, event: AstrMessageEvent, image_path: Path, preset_name: str | None, elapsed: float):
+    async def _send_image_with_info(
+        self,
+        event: AstrMessageEvent,
+        image_path: Path,
+        preset_name: str | None,
+        elapsed: float,
+        model: str | None = None,
+    ):
         """发送图片+信息标签"""
         await event.send(event.image_result(str(image_path)))
         if self._show_image_info:
-            info_text = f"{preset_name or '默认'} | 耗时{int(elapsed)}秒"
+            model_tag = ""
+            if model:
+                if is_v5_model(model):
+                    model_tag = " | V5-Curated" if "curated" in model else " | V5"
+                else:
+                    model_tag = f" | {model.replace('nai-diffusion-', '')}"
+            elif is_v5_model(self.client.default_model):
+                model_tag = " | V5-Curated" if "curated" in self.client.default_model else " | V5"
+            info_text = f"{preset_name or '默认'}{model_tag} | 耗时{int(elapsed)}秒"
             await event.send(event.plain_result(info_text))
 
     async def _do_generate(
@@ -398,10 +430,11 @@ class Nai2ApiPlugin(Star):
         artist: str | None = None,
         negative: str | None = None,
         seed: int | None = None,
+        model: str | None = None,
     ) -> Path:
         """执行生图并返回本地图片路径"""
         image_bytes = await self.client.generate(
-            prompt, size=size, artist=artist, negative=negative, seed=seed
+            prompt, size=size, artist=artist, negative=negative, seed=seed, model=model
         )
         return await self.imgr.save_image(image_bytes)
 
@@ -442,10 +475,12 @@ class Nai2ApiPlugin(Star):
             return event.plain_result(
                 "Nai2API 生图插件 (Plus)\n"
                 "用法:\n"
-                "  /nai [尺寸] <提示词> [-p 预设] [--artist 画师串] [--negative 负面] [--seed 种子] [--no-preset]\n\n"
+                "  /nai [尺寸] <提示词> [-m 模型] [-p 预设] [--artist 画师串] [--negative 负面] [--seed 种子] [--no-preset]\n\n"
                 "示例:\n"
                 "  /nai 1girl, silver hair, blue eyes\n"
                 "  /nai 竖图 1girl, white dress\n"
+                "  /nai -m 5 1girl, silver hair              (使用 V5 模型)\n"
+                "  /nai -m 5c 1girl, blue eyes               (使用 V5 Curated 模型)\n"
                 "  /nai -p 动漫风 1girl, silver hair\n"
                 "  /nai 2K竖图 -p GalGame风 1girl\n"
                 "  /nai 1girl --artist best quality, absurdres\n"
@@ -462,7 +497,7 @@ class Nai2ApiPlugin(Star):
                 "  /nai balance                     查询剩余点数"
             )
 
-        size, prompt, preset_name, artist, negative, seed, no_preset = _parse_nai_command(args)
+        size, prompt, preset_name, artist, negative, seed, no_preset, model = _parse_nai_command(args)
 
         if not prompt:
             return event.plain_result("提示词不能为空")
@@ -498,18 +533,19 @@ class Nai2ApiPlugin(Star):
         try:
             start = time.time()
             image_path = await self._do_generate(
-                final_prompt, size=size, artist=final_artist, negative=final_negative, seed=seed
+                final_prompt, size=size, artist=final_artist, negative=final_negative, seed=seed, model=model
             )
             elapsed = time.time() - start
             display_preset = effective_preset or "默认"
-            await self._send_image_with_info(event, image_path, display_preset, elapsed)
+            await self._send_image_with_info(event, image_path, display_preset, elapsed, model=model)
             return None
         except Exception as e:
             logger.error("[Nai2API] 生图失败: %s", e)
             if self._show_image_info:
                 elapsed = time.time() - start
                 reason = str(e)[:30] if str(e) else "未知错误"
-                info_text = f"{effective_preset or '默认'} | 耗时{int(elapsed)}秒\n失败原因：{reason}"
+                model_tag = f" | {model}" if model else ""
+                info_text = f"{effective_preset or '默认'}{model_tag} | 耗时{int(elapsed)}秒\n失败原因：{reason}"
                 return event.plain_result(info_text)
             return event.plain_result(f"生图失败: {e}")
 
@@ -551,9 +587,10 @@ class Nai2ApiPlugin(Star):
                 lines.append(f"备注: {note}")
             lines.append("---")
             lines.append("预计可生成:")
-            lines.append(f"  普通尺寸: ~{balance_int} 张")
-            lines.append(f"  2K尺寸: ~{balance_int // 15} 张")
-            lines.append(f"  4K尺寸: ~{balance_int // 25} 张")
+            lines.append(f"  V4.5 普通尺寸: ~{balance_int} 张 (1点/张)")
+            lines.append(f"  V5 普通尺寸: ~{balance_int // 5} 张 (5点/张)")
+            lines.append(f"  2K尺寸: ~{balance_int // 15} 张 (15点/张)")
+            lines.append(f"  4K尺寸: ~{balance_int // 25} 张 (25点/张)")
 
             return self._forward_result(event, "Nai2API 余额查询", "\n".join(lines))
         except Exception as e:
@@ -674,6 +711,7 @@ class Nai2ApiPlugin(Star):
         negative: str = "",
         preset: str = "",
         seed: str = "0",
+        model: str = "",
     ):
         """使用 NovelAI 生成图片。
 
@@ -684,6 +722,7 @@ class Nai2ApiPlugin(Star):
             negative(string): 负面提示词，留空使用默认
             preset(string): 预设名称，例如 "动漫风"、"GalGame风"，留空使用默认预设
             seed(string): 随机种子，数字字符串，"0" 表示自动随机
+            model(string): 模型名称或简写，如 "5"、"5-curated"、"4.5"，留空使用默认模型
         """
         if not self._llm_tool_enabled:
             return mcp.types.CallToolResult(
@@ -694,6 +733,9 @@ class Nai2ApiPlugin(Star):
             return mcp.types.CallToolResult(
                 content=[mcp.types.TextContent(type="text", text="提示词不能为空")]
             )
+
+        # 解析模型参数
+        final_model = resolve_model_alias(model.strip()) if model and model.strip() else None
 
         # 确定预设
         effective_preset = preset.strip() or self._default_preset or None
@@ -734,11 +776,12 @@ class Nai2ApiPlugin(Star):
                 artist=final_artist,
                 negative=final_negative,
                 seed=final_seed,
+                model=final_model,
             )
             elapsed = time.time() - start
 
             display_preset = effective_preset or "默认"
-            await self._send_image_with_info(event, image_path, display_preset, elapsed)
+            await self._send_image_with_info(event, image_path, display_preset, elapsed, model=final_model)
 
             return mcp.types.CallToolResult(
                 content=[mcp.types.TextContent(
@@ -776,9 +819,10 @@ class Nai2ApiPlugin(Star):
                 lines.append(f"备注: {note}")
             lines.append("---")
             lines.append("预计可生成:")
-            lines.append(f"  普通尺寸: ~{balance_int} 张")
-            lines.append(f"  2K尺寸: ~{balance_int // 15} 张")
-            lines.append(f"  4K尺寸: ~{balance_int // 25} 张")
+            lines.append(f"  V4.5 普通尺寸: ~{balance_int} 张 (1点/张)")
+            lines.append(f"  V5 普通尺寸: ~{balance_int // 5} 张 (5点/张)")
+            lines.append(f"  2K尺寸: ~{balance_int // 15} 张 (15点/张)")
+            lines.append(f"  4K尺寸: ~{balance_int // 25} 张 (25点/张)")
 
             result_text = "\n".join(lines)
             await event.send(self._forward_result(event, "Nai2API 余额查询", result_text))

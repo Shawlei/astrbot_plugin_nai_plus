@@ -39,7 +39,7 @@ git clone https://github.com/Shawlei/astrbot_plugin_nai_plus.git
 |--------|------|--------|
 | `api_url` | Nai2API 服务端地址 | `https://nai.sta1n.cn` |
 | `token` | Nai2API 用户密钥（必填） | 空 |
-| `default_model` | 默认生图模型 | `nai-diffusion-4-5-full` |
+| `default_model` | 默认生图模型（支持 V5 Full、V5 Curated、V4.5、V4、V3 等） | `nai-diffusion-4-5-full` |
 | `default_size` | 默认图片尺寸 | `竖图` |
 | `default_steps` | 默认步数（1-28） | `28` |
 | `default_scale` | 提示词引导系数 (CFG) | `6` |
@@ -59,6 +59,8 @@ git clone https://github.com/Shawlei/astrbot_plugin_nai_plus.git
 ```text
 /nai 1girl, white hair, blue eyes
 /nai 竖图 1girl, smiling
+/nai -m 5 1girl, masterpiece                # 使用 V5 Full 模型
+/nai -m 5c 1girl, cinematic lighting        # 使用 V5 Curated 模型
 /nai 横图 -p 动漫风 1girl, city street
 /nai 2K竖图 1girl, masterpiece --seed 123456
 /nai 1girl, solo --no-preset              # 临时跳过已设置的默认预设
@@ -93,7 +95,7 @@ git clone https://github.com/Shawlei/astrbot_plugin_nai_plus.git
 ```text
 astrbot_plugin_nai_plus/
 ├── main.py                     # 插件入口，注册指令、LLM 工具与 WebAPI
-├── metadata.yaml               # 插件元信息（版本 0.1.0）
+├── metadata.yaml               # 插件元信息（版本 0.2.0）
 ├── _conf_schema.json           # 插件配置项 Schema 定义（含 template_list）
 ├── requirements.txt            # Python 依赖清单
 ├── README.md                   # 仓库说明文档

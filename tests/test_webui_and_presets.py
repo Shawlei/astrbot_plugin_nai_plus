@@ -272,6 +272,12 @@ class TestWebUIApiEndpoints(unittest.IsolatedAsyncioTestCase):
         self.plugin = Nai2ApiPlugin(mock_context, self.config)
         self.mock_web_routes = mock_web_routes
 
+    def tearDown(self):
+        import shutil
+        data_dir = PLUGIN_ROOT / "tests" / "tmp_data"
+        if data_dir.exists():
+            shutil.rmtree(data_dir, ignore_errors=True)
+
     def test_routes_registered(self):
         expected_routes = [
             "config",
@@ -413,7 +419,7 @@ class TestCommandParsingAndResolution(unittest.TestCase):
         self.parse = _parse_nai_command
 
     def test_parse_flags(self):
-        size, prompt, preset_name, artist, neg, seed, no_preset = self.parse(
+        size, prompt, preset_name, artist, neg, seed, no_preset, model = self.parse(
             "竖图 1girl, smiling -p 动漫风 --artist 1.2::artist:test:: --negative bad hands --seed 9999"
         )
         self.assertEqual(size, "竖图")
@@ -423,14 +429,95 @@ class TestCommandParsingAndResolution(unittest.TestCase):
         self.assertEqual(neg, "bad hands")
         self.assertEqual(prompt, "1girl, smiling")
         self.assertFalse(no_preset)
+        self.assertIsNone(model)
 
     def test_parse_no_preset(self):
-        size, prompt, preset_name, artist, neg, seed, no_preset = self.parse(
+        size, prompt, preset_name, artist, neg, seed, no_preset, model = self.parse(
             "1girl, solo --no-preset"
         )
         self.assertTrue(no_preset)
         self.assertEqual(prompt, "1girl, solo")
         self.assertIsNone(preset_name)
+        self.assertIsNone(model)
+
+    def test_parse_model_flags(self):
+        # Short flag -m with alias "5"
+        size, prompt, preset_name, artist, neg, seed, no_preset, model = self.parse(
+            "1girl -m 5"
+        )
+        self.assertEqual(model, "nai-diffusion-5-full")
+        self.assertEqual(prompt, "1girl")
+
+        # Long flag --model with alias "5c"
+        size, prompt, preset_name, artist, neg, seed, no_preset, model = self.parse(
+            "1girl --model 5c"
+        )
+        self.assertEqual(model, "nai-diffusion-5-curated")
+        self.assertEqual(prompt, "1girl")
+
+        # Combined flags
+        size, prompt, preset_name, artist, neg, seed, no_preset, model = self.parse(
+            "横图 1girl -m v5 --artist 1.2::artist:test:: --negative bad hands -p 动漫风"
+        )
+        self.assertEqual(size, "横图")
+        self.assertEqual(model, "nai-diffusion-5-full")
+        self.assertEqual(artist, "1.2::artist:test::")
+        self.assertEqual(neg, "bad hands")
+        self.assertEqual(preset_name, "动漫风")
+        self.assertEqual(prompt, "1girl")
+
+
+class TestModelResolutionAndV5Detection(unittest.TestCase):
+    """Test model alias resolution and V5 model detection."""
+
+    def test_resolve_model_alias(self):
+        from astrbot_plugin_nai_plus.core.nai2api_client import (
+            resolve_model_alias,
+            MODEL_V5_FULL,
+            MODEL_V5_CURATED,
+        )
+
+        # V5 aliases
+        for alias in ["5", "v5", "5full", "5-full", "v5full", "v5-full", "nai-diffusion-5-full"]:
+            self.assertEqual(resolve_model_alias(alias), MODEL_V5_FULL)
+            self.assertEqual(resolve_model_alias(alias.upper()), MODEL_V5_FULL)
+
+        for alias in ["5c", "v5c", "5curated", "5-curated", "v5curated", "v5-curated", "nai-diffusion-5-curated"]:
+            self.assertEqual(resolve_model_alias(alias), MODEL_V5_CURATED)
+            self.assertEqual(resolve_model_alias(alias.upper()), MODEL_V5_CURATED)
+
+        # Older models
+        self.assertEqual(resolve_model_alias("4.5"), "nai-diffusion-4-5-full")
+        self.assertEqual(resolve_model_alias("v4.5"), "nai-diffusion-4-5-full")
+        self.assertEqual(resolve_model_alias("4"), "nai-diffusion-4-full")
+        self.assertEqual(resolve_model_alias("3"), "nai-diffusion-3")
+        self.assertEqual(resolve_model_alias("furry"), "nai-diffusion-furry-3")
+        self.assertEqual(resolve_model_alias("safe"), "safe-diffusion")
+
+        # Unknown or None
+        self.assertEqual(resolve_model_alias("custom-model-x"), "custom-model-x")
+        self.assertIsNone(resolve_model_alias(None))
+        self.assertIsNone(resolve_model_alias(""))
+
+    def test_is_v5_model(self):
+        from astrbot_plugin_nai_plus.core.nai2api_client import (
+            is_v5_model,
+            MODEL_V5_FULL,
+            MODEL_V5_CURATED,
+        )
+
+        self.assertTrue(is_v5_model(MODEL_V5_FULL))
+        self.assertTrue(is_v5_model(MODEL_V5_CURATED))
+        self.assertTrue(is_v5_model("5"))
+        self.assertTrue(is_v5_model("v5"))
+        self.assertTrue(is_v5_model("5c"))
+        self.assertTrue(is_v5_model("v5-curated"))
+
+        self.assertFalse(is_v5_model("nai-diffusion-4-5-full"))
+        self.assertFalse(is_v5_model("4.5"))
+        self.assertFalse(is_v5_model("3"))
+        self.assertFalse(is_v5_model(None))
+        self.assertFalse(is_v5_model(""))
 
 
 class TestConfigAndSchemaIntegrity(unittest.TestCase):
@@ -450,6 +537,15 @@ class TestConfigAndSchemaIntegrity(unittest.TestCase):
         self.assertIn("positive", template)
         self.assertIn("negative", template)
         self.assertIn("desc", template)
+
+        # default_model V5 options verification
+        self.assertIn("default_model", schema)
+        options = schema["default_model"]["options"]
+        self.assertGreaterEqual(len(options), 2)
+        self.assertEqual(options[0], "nai-diffusion-5-full")
+        self.assertEqual(options[1], "nai-diffusion-5-curated")
+        self.assertIn(schema["default_model"]["default"], options)
+        self.assertIn("V5", schema["default_model"]["hint"])
 
     def test_i18n_pages_registered(self):
         zh_path = PLUGIN_ROOT / ".astrbot-plugin" / "i18n" / "zh-CN.json"
