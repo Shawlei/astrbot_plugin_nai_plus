@@ -14,36 +14,16 @@
   },
   "default_model": {
     "description": "默认模型",
-    "hint": "NovelAI 模型名称。V5 系列普通图扣 5 点，V4.5 系列普通图扣 1 点；2K/4K 两者都是 15/25 点",
+    "hint": "NovelAI 模型名称",
     "type": "string",
-    "options": [
-      "nai-diffusion-5-full",
-      "nai-diffusion-5-curated",
-      "nai-diffusion-4-5-full",
-      "nai-diffusion-4-5-curated",
-      "nai-diffusion-4-full",
-      "nai-diffusion-3",
-      "nai-diffusion-furry-3",
-      "nai-diffusion-2",
-      "safe-diffusion"
-    ],
-    "default": "nai-diffusion-5-full"
+    "options": ["nai-diffusion-4-5-full", "nai-diffusion-4-full", "nai-diffusion-3", "nai-diffusion-furry-3", "nai-diffusion-2", "safe-diffusion"],
+    "default": "nai-diffusion-4-5-full"
   },
   "default_size": {
     "description": "默认图片尺寸",
-    "hint": "普通=V4.5 扣1点/V5 扣5点，2K=15点，4K=25点",
+    "hint": "普通=1点，2K=15点，4K=25点",
     "type": "string",
-    "options": [
-      "竖图",
-      "横图",
-      "方图",
-      "2K竖图",
-      "2K横图",
-      "2K方图",
-      "4K竖图",
-      "4K横图",
-      "4K方图"
-    ],
+    "options": ["竖图", "横图", "方图", "2K竖图", "2K横图", "2K方图", "4K竖图", "4K横图", "4K方图"],
     "default": "竖图"
   },
   "default_steps": {
@@ -82,17 +62,7 @@
   "default_sampler": {
     "description": "默认采样器",
     "type": "string",
-    "options": [
-      "k_dpmpp_2m_sde",
-      "k_dpmpp_sde",
-      "k_dpmpp_2m",
-      "k_dpmpp_2s_ancestral",
-      "k_euler",
-      "k_euler_ancestral",
-      "k_dpm_fast",
-      "k_dpm_adaptive",
-      "ddim"
-    ],
+    "options": ["k_dpmpp_2m_sde", "k_dpmpp_sde", "k_dpmpp_2m", "k_dpmpp_2s_ancestral", "k_euler", "k_euler_ancestral", "k_dpm_fast", "k_dpm_adaptive", "ddim"],
     "default": "k_dpmpp_2m_sde"
   },
   "default_negative": {
@@ -103,23 +73,14 @@
   },
   "default_artist": {
     "description": "默认画师串/质量前缀",
-    "hint": "作为**独立的 artist 参数**发送给 Nai2API（不是拼进 tag）。v1.6.0 起默认是**日系动漫风**（标准二次元插画感，最接近动画/游戏立绘），刻意不含构图标签，把构图交给「自动补构图标签」兜底。想要写实 / 2.5D 效果：在 WebUI 面板里选「2.5D唯美风」预设，或把它复制成自己的默认画师串（老的那串完整保留在那个预设里，没有丢）。想要更强的个人风格：用「默认预设」功能套用「动漫风」「韩漫小清新风」等。随时可以在这里自由改写。⚠️ **留空 = 不发送画师串，此时 Nai2API 服务端会用它自己的默认画师串（默认 2.5D唯美风）打头**，并不是「中性 / 无风格」——想彻底不被覆盖，需在 Nai2API 面板里清空服务端自己的画师串",
+    "hint": "留空则不传画师串。Nai2API 默认使用 2.5D唯美风，可通过 -p 预设切换",
     "type": "text",
-    "default": "year 2024, anime style, illustration, best quality, amazing quality, very aesthetic, absurdres, masterpiece, no text"
-  },
-  "auto_composition": {
-    "type": "bool",
-    "description": "自动补构图标签",
-    "hint": "NovelAI 在没有任何构图/景别标签时，会退回训练数据的统计偏好 —— 默认出 portrait / upper body，也就是「张张都是半身」。开启后，当提示词和画师串都没给构图约束时，自动补 full body, standing。想固定画头像时可关闭，或在提示词里自己写「半身 / 胸像 / 特写」",
-    "default": true
+    "default": "0.9::misaka_12003-gou ::, dino_(dinoartforame), wanke, liduke, year 2025, realistic, 4k, -2::green ::, textless version, The image is highly intricate finished drawn. Only the character's face is in anime style, but their body is in realistic style. 1.35::A highly finished photo-style artwork that has lively color, graphic texture, realistic skin surface, and lifelike flesh with little obliques::. 1.63::photorealistic::, 1.63::photo(medium)::, \\n20::best quality, absurdres, very aesthetic, detailed, masterpiece::,, very aesthetic, masterpiece, no text,"
   },
   "default_noise_schedule": {
     "description": "默认噪声调度",
     "type": "string",
-    "options": [
-      "karras",
-      "native"
-    ],
+    "options": ["karras", "native"],
     "default": "karras"
   },
   "timeout": {
@@ -139,77 +100,9 @@
     "type": "bool",
     "default": true
   },
-  "custom_presets": {
-    "description": "预设管理",
-    "hint": "在这里增删改预设，不用改文件也不用发指令，改完立即生效。点「添加条目」新增一个预设，填预设名，再填画师串 / 附带正向词 / 附带负向词（三项至少填一项）即可。这里保存的预设会覆盖同名内置预设，也能被 /nai save、/nai del、/nai update 指令和插件页面「NovelAI 配置管理」读写（几种方式操作同一份数据）。",
-    "type": "template_list",
-    "default": [],
-    "templates": {
-      "preset": {
-        "name": "预设",
-        "hint": "一个自定义预设",
-        "items": {
-          "name": {
-            "description": "预设名",
-            "hint": "调用时用的名字，不能含空格，例如 我的唯美风。不要和内置预设重名（2.5D唯美风 / 韩漫小清新风 / 本子动漫风 / GalGame风 / 动漫风）",
-            "type": "string",
-            "default": ""
-          },
-          "artist": {
-            "description": "质量前缀 / 画师串",
-            "hint": "拼在提示词最前面。可以写画师串、质量词、构图词，例如 best quality, absurdres, detailed, full body。里面的负权重（-2::green::）会自动移到负面提示词。可留空（沿用全局画师串），但画师串 / 正向词 / 负向词三项至少填一项",
-            "type": "text",
-            "default": ""
-          },
-          "positive": {
-            "description": "附带正向词",
-            "hint": "用这个预设生图时，自动追加到用户提示词后面的英文标签，例如 soft lighting, night, city lights。和用户提示词重复的标签会自动跳过。可留空",
-            "type": "text",
-            "default": ""
-          },
-          "negative": {
-            "description": "附带负向词",
-            "hint": "用这个预设生图时，追加到全局负向词后面（是追加不是替换，全局的 bad hands / lowres 等兜底仍然生效）。可留空",
-            "type": "text",
-            "default": ""
-          },
-          "desc": {
-            "description": "备注",
-            "hint": "只用于在列表里显示，可留空",
-            "type": "string",
-            "default": ""
-          }
-        }
-      }
-    }
-  },
-  "default_preset": {
-    "description": "默认预设",
-    "hint": "填预设名（内置的如「动漫风」「韩漫小清新风」，或你自己建的）。填了之后每次生图自动套用它的三段内容（画师串 + 附带正向词 + 附带负向词），不用每次写 -p。临时换别的：/nai -p 其它预设名；临时完全不用：/nai --no-preset。留空 = 不使用。建议从 WebUI 面板的「设为默认风格」按钮设置 —— 手填名字容易写错",
-    "type": "string",
-    "default": ""
-  },
-  "group_blacklist": {
-    "description": "群聊黑名单",
-    "hint": "填群号，多个用逗号或换行分隔。黑名单里的群**完全不会触发生图**：无论谁发什么指令、有没有 @ 机器人都一样，而且机器人不会在该群发任何回复（连报错都不发，彻底静默）。留空则所有群正常可用。只对群聊生效，私聊不受影响。示例：123456789, 987654321",
-    "type": "text",
-    "default": ""
-  },
   "show_image_info": {
     "description": "图片信息标签",
     "hint": "开启后在图片下方显示预设名和耗时",
-    "type": "bool",
-    "default": true
-  },
-  "send_retry_on_timeout": {
-    "description": "发图超时自动重试",
-    "hint": "QQ（NapCat）发大图偶发「sendMsg Timeout」。开启：超时后隔 2 秒再发一次（可能收到两张重复的图，因为超时不代表真没发出去）。关闭：只发一次，超时就直接提示「图已生成但发送超时」并给本地路径（不会重复，但偶尔会漏图）。默认关闭",
-    "type": "bool",
-    "default": false
-  },
-  "confirm_hd_size": {
-    "description": "高扣点生图二次确认",
-    "hint": "开启后，2K(15点)/4K(25点) 以及 V5 模型的普通尺寸(5点) 会先询问确认再生成，防止误扣",
     "type": "bool",
     "default": true
   },
@@ -234,304 +127,6 @@
       "min": 10,
       "max": 500,
       "step": 1
-    }
-  },
-  "command_names": {
-    "description": "命令名（自定义前缀/别名）",
-    "hint": "填写触发指令的名字，多个用英文逗号分隔，例如：nai 或 nai,niu,绘。改完需要重载插件生效。「/」或「+」这类前缀符号是 AstrBot 的全局设置（data/cmd_config.json 里的 wake_prefix），插件无法单独修改；如果你把前缀设成 + ，这里填 nai，实际指令就是 +nai",
-    "type": "string",
-    "default": "nai"
-  },
-  "translate_enabled": {
-    "description": "开启提示词直译",
-    "hint": "开启后，中文/英文提示词都会先交给翻译模型转成 NovelAI 可识别的英文标签再生成",
-    "type": "bool",
-    "default": true
-  },
-  "translate_mode": {
-    "description": "直译接入方式",
-    "hint": "「用 AstrBot 的模型」直接复用你已经在 AstrBot 里配好的模型，不用另外填 key（推荐）；「自定义 OpenAI 兼容接口」则单独调你填的接口来翻译",
-    "type": "string",
-    "options": [
-      "astrbot",
-      "openai"
-    ],
-    "labels": [
-      "用 AstrBot 的模型（推荐）",
-      "自定义 OpenAI 兼容接口"
-    ],
-    "default": "astrbot"
-  },
-  "translate_provider_ids": {
-    "description": "翻译模型（AstrBot 模式）",
-    "hint": "点右边按钮直接从 AstrBot 已配置的模型里勾选，可以勾多个：按顺序轮询，前一个失败自动换下一个。留空则自动使用 AstrBot 里所有可用的对话模型",
-    "type": "list",
-    "items": {
-      "type": "string"
-    },
-    "default": [],
-    "_special": "select_providers"
-  },
-  "translate_openai_prefill": {
-    "description": "OpenAI 接口",
-    "hint": "从下面的列表里选一个预设接口，点「保存」后，接口地址和常用模型会自动填进下面两个框。想用别的接口就选「自定义」，然后自己填。",
-    "type": "string",
-    "options": [
-      "custom",
-      "openai",
-      "dashscope",
-      "deepseek",
-      "siliconflow",
-      "moonshot",
-      "zhipu",
-      "openrouter",
-      "ollama"
-    ],
-    "labels": [
-      "自定义（手动填地址）",
-      "OpenAI 官方",
-      "阿里云 百炼/通义千问",
-      "DeepSeek 官方",
-      "硅基流动 SiliconFlow",
-      "月之暗面 Kimi",
-      "智谱 GLM",
-      "OpenRouter",
-      "本地 Ollama"
-    ],
-    "default": "custom"
-  },
-  "translate_openai_base_url": {
-    "description": "OpenAI 接口地址",
-    "hint": "填到 /v1 为止，例如 https://api.openai.com/v1 或 https://dashscope.aliyuncs.com/compatible-mode/v1。插件会自动在后面拼 /chat/completions 和 /models",
-    "type": "string",
-    "default": ""
-  },
-  "translate_openai_api_key": {
-    "description": "OpenAI 接口密钥",
-    "hint": "填 sk-xxxx。留空则不发送鉴权头（本地部署的接口可能不需要 key）",
-    "type": "string",
-    "default": "",
-    "secret": true
-  },
-  "translate_openai_model": {
-    "description": "直译模型",
-    "hint": "点右边「获取模型列表」会自动请求你上面填的接口 /models 并拉取可选模型；拉不到时也可以直接手填模型名",
-    "type": "string",
-    "default": "",
-    "options": [],
-    "apply_provider_default": true
-  },
-  "translate_dictionary_enabled": {
-    "description": "词库直译（不走模型）",
-    "hint": "开启后，命中词库的短语会被直接替换成官方英文标签，完全不调用翻译模型，又快又准（角色名尤其准）。剩余的没命中的部分才交给模型。强烈建议开启",
-    "type": "bool",
-    "default": true
-  },
-  "translate_dictionary_match": {
-    "description": "词库匹配方式",
-    "hint": "「仅精确匹配」按逗号/空格切词后逐词查表，不会误伤（推荐）；「允许内嵌替换」还会在长句里做子串替换，能命中「白发少女站在樱花树下」这类连写句子，但短词可能误替换",
-    "type": "string",
-    "options": [
-      "segment",
-      "substring"
-    ],
-    "labels": [
-      "仅精确匹配（按词切分，推荐）",
-      "允许内嵌替换（连写句子也能命中）"
-    ],
-    "default": "segment"
-  },
-  "translate_verify_enabled": {
-    "description": "翻译结果校验",
-    "hint": "检查模型返回的结果里有没有残留中文，有就自动重翻一次；仍然有就按你的选择提示或放行。能挡掉大部分「模型偷懒没翻完」的情况",
-    "type": "bool",
-    "default": true
-  },
-  "translate_verify_retry": {
-    "description": "校验失败后重翻次数",
-    "hint": "检测到残留中文时自动重翻的次数。设为 0 表示不重翻，只提示",
-    "type": "int",
-    "default": 1,
-    "slider": {
-      "min": 0,
-      "max": 3,
-      "step": 1
-    }
-  },
-  "translate_verify_on_fail": {
-    "description": "重翻后仍有中文时",
-    "hint": "warn=照常生图但提醒你「有中文没翻掉」（推荐，不打断流程）；abort=直接终止不生图，避免浪费点数",
-    "type": "string",
-    "options": [
-      "warn",
-      "abort"
-    ],
-    "labels": [
-      "提醒但继续生图",
-      "终止不生图"
-    ],
-    "default": "warn"
-  },
-  "translate_quality_weight": {
-    "type": "bool",
-    "description": "质量词自动加权",
-    "hint": "给 best quality / masterpiece / absurdres 等质量标签自动套 1.2:: 权重。只处理裸质量词，已带权重的原样保留。内容标签（如 swimsuit）不加权重，避免过拟合。",
-    "default": true
-  },
-  "translate_quality_weight_value": {
-    "type": "string",
-    "description": "质量词权重倍数",
-    "hint": "质量词自动加权时使用的数值，1.2 为社区常用值。填数字即可，不要写 :: 符号。",
-    "default": "1.2"
-  },
-  "translate_user_dict_path": {
-    "description": "自定义词库文件路径",
-    "hint": "留空则只用插件内置词库。填一个 .json 或 .txt 路径可加载你自己的词库（会与内置词库合并，你的优先）。相对路径按 AstrBot 数据目录算。格式见 README「词库」章节",
-    "type": "string",
-    "default": ""
-  },
-  "translate_system_prompt": {
-    "description": "直译系统提示词",
-    "hint": "已预填插件内置提示词，可自由修改。内置版本做了这些约束：只输出英文标签、保留 1.2::tag:: / {{tag}} 等 NovelAI 权重语法、保留 artist:name 画师标签、不输出中文、保持标签顺序。改坏了可以清空恢复内置默认",
-    "type": "text",
-    "default": "You are a prompt translator for NovelAI image generation.\nTranslate the user's description into English Danbooru-style tags.\n\nRules:\n1. Output ONLY the tags, separated by commas. No explanation, no markdown, no quotes, no code fences, no extra sentences.\n2. Use tag keywords, not full sentences. Write 'long hair' not 'she has long hair'.\n3. If the input is already English tags, keep them VERBATIM. Do not rewrite, reorder, or add anything to them.\n4. PRESERVE any NovelAI weight syntax exactly as-is, never modify it: `1.2::tag::`, `{{tag}}`, `[tag]`, `-2::tag::`, `\\n20::tag::`.\n5. Preserve artist tags such as `artist:name`, `dino_(dinoartforame)` unchanged.\n6. Keep the original tag order as much as possible; quality tags stay where they are.\n7. SUBJECT COUNT IS MANDATORY. If the picture has a single person (the user named one character, or described one person), the output MUST include `1girl` or `1boy` as the FIRST tag (use `solo` if the gender is unknown). Only omit it when the user explicitly asks for multiple people or a scene with no people at all.\n8. Never output Chinese characters in the result.\n9. If the user asks for a size or other non-visual instruction, ignore it.\n10. Convert Chinese counters and quantifiers into tags: 双马尾 → twintails, 两把刀 → holding two swords.\n11. NEVER invent details the user did not mention. This is the MOST IMPORTANT rule. Do NOT add hair color, eye color, hairstyle, body type, clothing, or pose unless the user explicitly said it. If the user names a character you do not recognize, output ONLY that character's name as a tag — do NOT guess how the character looks.\n12. Do NOT output two tags that mean the same thing. Pick the single most accurate one and drop the rest: 泳装 → swimsuit (NOT swimsuit + bikini), 女孩 → 1girl (NOT 1girl + female). Near-synonyms stack as extra weight and distort the image.\n13. When in doubt, do NOT add a tag. Too few accurate tags is far better than extra guessed tags.\n\nExamples:\nInput: 白发少女站在樱花树下，回头微笑\nOutput: 1girl, white hair, standing, cherry blossoms, tree, looking back, smile\n\nInput: 原神 雷电将军 紫色长发 和服\nOutput: 1girl, raiden shogun, purple hair, long hair, japanese clothes\n\nInput: {{1girl}} 1.3::silver hair:: [detailed]\nOutput: {{1girl}}, 1.3::silver hair::, [detailed]\n\nInput: 1girl, silver hair, looking at viewer\nOutput: 1girl, silver hair, looking at viewer\n\nInput: 赛博朋克风格的城市夜景，霓虹灯，雨，氛围感\nOutput: cyberpunk, city, night, neon lights, rain, cinematic lighting, depth of field\n\nInput: 一个女孩抱着猫坐在床上，猫是橘色的\nOutput: 1girl, holding cat, cat, orange cat, sitting, on bed, indoors\n\nInput: 战双 比安卡 泳装\nOutput: 1girl, bianca_(punishing:_gray_raven), swimsuit\n\nInput: 动漫风 熟女 泳装\nOutput: 1girl, mature female, swimsuit, anime style\n\nInput: 鸣潮 达妮娅 泳装\nOutput: 1girl, dania_(wuthering_waves), swimsuit\n\nOutput the translated tags in a single line and nothing else."
-  },
-  "translate_timeout": {
-    "description": "单次翻译超时(秒)",
-    "hint": "单个翻译模型的最大等待时间，超时会自动切换下一个",
-    "type": "int",
-    "default": 60,
-    "slider": {
-      "min": 10,
-      "max": 300,
-      "step": 5
-    }
-  },
-  "translate_on_error": {
-    "description": "翻译失败时",
-    "hint": "fallback=翻译失败就用原文继续生成（不中断）；abort=翻译失败直接终止并提示，不白白扣点",
-    "type": "string",
-    "options": [
-      "fallback",
-      "abort"
-    ],
-    "default": "fallback"
-  },
-  "img2img_enabled": {
-    "description": "开启图生图",
-    "hint": "开启后，回复一张图片再发指令即可用它作为参考图。注意：Nai2API 网关本身没有图生图接口，这里需要你自己填一个支持图生图的渠道（详见 README）",
-    "type": "bool",
-    "default": false
-  },
-  "img2img_inherit_artist": {
-    "description": "图生图时带上画师串",
-    "hint": "默认关闭。图生图渠道多是 OpenAI 风格接口（如 gpt-image-2），不认 NovelAI 的画师串语法（artist:xxx、1.2::tag::），硬拼进去反而可能干扰画面。关闭时画师串不发送，出图风格完全由渠道模型决定（图片下方的信息标签会提示「画师串未生效」）；开启时画师串拼在提示词最前面，与文生图行为一致",
-    "type": "bool",
-    "default": false,
-    "condition": {"img2img_enabled": true}
-  },
-  "img2img": {
-    "description": "图生图渠道",
-    "condition": {
-      "img2img_enabled": true
-    },
-    "type": "object",
-    "items": {
-      "base_url": {
-        "description": "接口地址",
-        "hint": "完整地址，例如 https://api.openai.com/v1/images/edits 或 http://127.0.0.1:7860/sdapi/v1/img2img。插件不会自动补路径，请照渠道文档填全",
-        "type": "string",
-        "default": ""
-      },
-      "method": {
-        "description": "请求方式",
-        "type": "string",
-        "options": [
-          "POST",
-          "GET"
-        ],
-        "default": "POST"
-      },
-      "api_key": {
-        "description": "接口密钥",
-        "hint": "留空则不发送鉴权头（本地部署的接口通常不需要）",
-        "type": "string",
-        "default": "",
-        "secret": true
-      },
-      "auth_header": {
-        "description": "鉴权头名称",
-        "hint": "默认 Authorization。少数渠道用 X-API-Key 之类",
-        "type": "string",
-        "default": "Authorization"
-      },
-      "auth_prefix": {
-        "description": "鉴权头前缀",
-        "hint": "默认 Bearer （注意结尾有空格）。MiniMax 等渠道可能是空字符串",
-        "type": "string",
-        "default": "Bearer "
-      },
-      "content_type": {
-        "description": "提交格式",
-        "hint": "multipart/form-data 用于上传文件（Stable Diffusion WebUI、OpenAI images/edits 等多数渠道）；application/json 用于把图片以 base64 塞进 JSON（NovelAI、部分中转）",
-        "type": "string",
-        "options": [
-          "multipart/form-data",
-          "application/json"
-        ],
-        "default": "multipart/form-data"
-      },
-      "body_template": {
-        "description": "请求体模板",
-        "hint": "把渠道文档里的请求体粘进来，把具体值换成占位符：{{prompt}} {{negative}} {{image_base64}} {{image_data_url}} {{strength}} {{noise}} {{seed}} {{model}} {{size}}。JSON 格式直接写 JSON；multipart 格式每行写 key=value。完整示例见 README",
-        "type": "text",
-        "default": ""
-      },
-      "image_field": {
-        "description": "图片字段名",
-        "hint": "仅 multipart 格式需要。参考图在表单里的字段名，例如 image、init_images、file。默认 image",
-        "type": "string",
-        "default": "image"
-      },
-      "response_path": {
-        "description": "响应图片路径",
-        "hint": "从返回的 JSON 里取图片的路径，例如 data.0.b64_json 或 images.0。留空则自动识别常见字段。支持 a.b.0.c 这种写法",
-        "type": "string",
-        "default": ""
-      },
-      "default_strength": {
-        "description": "默认相似度",
-        "hint": "参考图的相似程度，越大越贴近原图。多数渠道建议 0.5-0.8。聊天里可用 --strength 临时覆盖",
-        "type": "float",
-        "default": 0.7,
-        "slider": {
-          "min": 0,
-          "max": 1,
-          "step": 0.05
-        }
-      },
-      "default_noise": {
-        "description": "默认降噪",
-        "hint": "改动幅度，越大离原图越远。多数渠道建议 0.1-0.3。聊天里可用 --noise 临时覆盖",
-        "type": "float",
-        "default": 0.2,
-        "slider": {
-          "min": 0,
-          "max": 1,
-          "step": 0.05
-        }
-      },
-      "timeout": {
-        "description": "请求超时(秒)",
-        "hint": "图生图通常比文生图慢，建议 120 秒以上",
-        "type": "int",
-        "default": 120,
-        "slider": {
-          "min": 30,
-          "max": 600,
-          "step": 10
-        }
-      }
     }
   }
 }
