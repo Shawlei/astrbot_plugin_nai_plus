@@ -417,6 +417,13 @@
     "type": "bool",
     "default": false
   },
+  "img2img_inherit_artist": {
+    "description": "图生图时带上画师串",
+    "hint": "默认关闭。图生图渠道多是 OpenAI 风格接口（如 gpt-image-2），不认 NovelAI 的画师串语法（artist:xxx、1.2::tag::），硬拼进去反而可能干扰画面。关闭时画师串不发送，出图风格完全由渠道模型决定（图片下方的信息标签会提示「画师串未生效」）；开启时画师串拼在提示词最前面，与文生图行为一致",
+    "type": "bool",
+    "default": false,
+    "condition": {"img2img_enabled": true}
+  },
   "img2img": {
     "description": "图生图渠道",
     "condition": {

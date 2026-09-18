@@ -813,6 +813,172 @@ check("asyncio.to_thread(_materialize_image" in _src,
       "main.py 应用 asyncio.to_thread(_materialize_image, ...) 调用")
 
 # ---------------------------------------------------------------------------
+# 13. v1.4.6：图生图不再静默丢弃画师串
+# ---------------------------------------------------------------------------
+# 背景：文生图会把画师串拼进提示词最前面（nai2api_client.py），但图生图分支
+# 调用 img2img.generate() 时**压根没传 artist**，而 Img2ImgClient.generate()
+# 的签名里也没有这个参数 —— 于是用户一旦「回复带图的消息」发指令，画师串就
+# 无声失效，出的是渠道模型自己的风格，用户以为还是 NovelAI，完全无从排查。
+#
+# 修法：新增 img2img_inherit_artist（默认关）：
+#   关闭 → 不发送，但要记日志 + 在信息标签里标「画师串未生效」
+#   开启 → 拼在提示词最前面，与文生图行为一致
+
+# ① schema 里有这个开关，且默认 false、只在图生图开启时显示
+check("img2img_inherit_artist" in schema, "_conf_schema.json 缺 img2img_inherit_artist")
+_i2i_artist_cfg = schema.get("img2img_inherit_artist", {})
+check(_i2i_artist_cfg.get("type") == "bool", "img2img_inherit_artist 应为 bool 类型")
+check(_i2i_artist_cfg.get("default") is False,
+      "img2img_inherit_artist 默认必须是 false（图生图渠道多不认 NovelAI 画师串语法）")
+check(_i2i_artist_cfg.get("condition") == {"img2img_enabled": True},
+      "img2img_inherit_artist 应只在开启图生图时显示")
+# 必须放顶层，不能塞进 img2img 那个 object 的 items 里
+check("img2img_inherit_artist" not in (schema.get("img2img", {}).get("items") or {}),
+      "img2img_inherit_artist 应放在顶层，不要塞进 img2img.items")
+# __init__ 要真的把它读进来（否则 schema 加了也是摆设）
+check(plugin._img2img_inherit_artist is False,
+      f"__init__ 应读入 img2img_inherit_artist（schema 默认 false）: {plugin._img2img_inherit_artist!r}")
+
+# ② _build_info_label：图生图 + 画师串被丢弃 → 标签要写明
+_lab_ignored = plugin._build_info_label(
+    "夜景", 3.2, None, is_img2img=True, strength=0.6, artist_ignored=True)
+check("画师串未生效" in _lab_ignored,
+      f"图生图画师串被丢弃时标签应含「画师串未生效」: {_lab_ignored!r}")
+check("图生图" in _lab_ignored and "相似度0.60" in _lab_ignored,
+      f"加了提示后仍应保留图生图 / 相似度信息: {_lab_ignored!r}")
+_lab_ok = plugin._build_info_label(
+    "夜景", 3.2, None, is_img2img=True, strength=0.6, artist_ignored=False)
+check("画师串未生效" not in _lab_ok, f"没丢弃时不应出现该提示: {_lab_ok!r}")
+# 默认参数（老调用方不传 artist_ignored）也不能炸、不能凭空多出提示
+_lab_default = plugin._build_info_label("夜景", 3.2, None, is_img2img=True, strength=0.6)
+check("画师串未生效" not in _lab_default, f"默认参数下不应出现该提示: {_lab_default!r}")
+# 文生图路径即使误传 artist_ignored 也不该出现（该文案只属于图生图）
+_lab_t2i = plugin._build_info_label("夜景", 3.2, "nai-diffusion-4-5-full", artist_ignored=True)
+check("画师串未生效" not in _lab_t2i, f"文生图标签不应出现图生图专属提示: {_lab_t2i!r}")
+
+
+# ③ _do_generate：关 → prompt 不含画师串；开 → prompt 以画师串开头
+class _FakeImg2ImgChannel:
+    """假图生图渠道：只记录收到的 prompt，不发任何请求"""
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def generate(self, prompt, image_bytes, *, negative=None,
+                       strength=None, noise=None, seed=None, model=None, size=None):
+        self.calls.append({"prompt": prompt, "image_bytes": image_bytes,
+                           "negative": negative, "model": model, "size": size})
+        return b"FAKE_IMG_BYTES"
+
+
+class _FakeNaiClient:
+    """_do_generate 的图生图分支只会用到这两个成员"""
+    default_model = "nai-diffusion-4-5-full"
+
+    def resolve_size(self, size):
+        return size or "832x1216"
+
+
+class _FakeImgr:
+    async def save_image(self, out):
+        p = tmp / "fake_i2i_out.png"
+        p.write_bytes(out if isinstance(out, bytes) else b"x")
+        return p
+
+
+_ref_img = tmp / "ref_src.png"
+_ref_img.write_bytes(b"\x89PNG\r\n\x1a\nREF")
+
+_orig_img2img = plugin.img2img
+_orig_nai_client = plugin.client
+_orig_imgr = plugin.imgr
+_orig_inherit_artist = plugin._img2img_inherit_artist
+
+
+def _img2img_prompt(artist, inherit):
+    """跑一次图生图分支，返回真正发给渠道的 prompt"""
+    chan = _FakeImg2ImgChannel()
+    plugin.img2img = chan
+    plugin.client = _FakeNaiClient()
+    plugin.imgr = _FakeImgr()
+    plugin._img2img_inherit_artist = inherit
+    try:
+        asyncio.run(plugin._do_generate(
+            "1girl, solo, swimsuit", artist=artist, ref_image_path=str(_ref_img),
+        ))
+    finally:
+        plugin.img2img = _orig_img2img
+        plugin.client = _orig_nai_client
+        plugin.imgr = _orig_imgr
+    return chan.calls[0]["prompt"] if chan.calls else None
+
+
+_ARTIST = "artist:wlop, 1.2::best quality::"
+
+# 关闭（默认）→ 画师串绝不出现
+p_off = _img2img_prompt(_ARTIST, False)
+check(p_off == "1girl, solo, swimsuit", f"关闭继承时提示词应原样不含画师串: {p_off!r}")
+check("artist:wlop" not in (p_off or ""), f"关闭继承时画师串不得泄进提示词: {p_off!r}")
+
+# 开启 → 画师串拼在最前面，与文生图一致
+p_on = _img2img_prompt(_ARTIST, True)
+check(p_on is not None and p_on.startswith(_ARTIST), f"开启继承时提示词应以画师串开头: {p_on!r}")
+check(p_on == f"{_ARTIST}, 1girl, solo, swimsuit", f"拼接格式应为「画师串, 提示词」: {p_on!r}")
+
+# 画师串为空 / 全空格 / None → 两种设置下都不该产生 ", prompt" 这种脏拼接
+for _empty in (None, "", "   "):
+    check(_img2img_prompt(_empty, True) == "1girl, solo, swimsuit",
+          f"画师串为 {_empty!r} 时不应改变提示词（开启继承）")
+    check(_img2img_prompt(_empty, False) == "1girl, solo, swimsuit",
+          f"画师串为 {_empty!r} 时不应改变提示词（关闭继承）")
+
+# ④ _send_image_with_info 的标签联动：关闭继承 + 有画师串 → 出现「画师串未生效」
+plugin._img2img_inherit_artist = False
+ev_lab = _FakeEvent(fail_image_times=0)
+asyncio.run(plugin._send_image_with_info(
+    ev_lab, fake_img, "夜景", 2.5, None,
+    is_img2img=True, strength=0.6, artist=_ARTIST,
+))
+_plain = [t for k, t in ev_lab.sent if k == "plain"]
+check(bool(_plain) and "画师串未生效" in _plain[-1],
+      f"图生图 + 画师串未继承时，信息标签应提示「画师串未生效」: {_plain!r}")
+
+# 开启继承 → 标签不应再提示未生效
+plugin._img2img_inherit_artist = True
+ev_lab2 = _FakeEvent(fail_image_times=0)
+asyncio.run(plugin._send_image_with_info(
+    ev_lab2, fake_img, "夜景", 2.5, None,
+    is_img2img=True, strength=0.6, artist=_ARTIST,
+))
+_plain2 = [t for k, t in ev_lab2.sent if k == "plain"]
+check(bool(_plain2) and "画师串未生效" not in _plain2[-1],
+      f"开启继承后标签不应再提示未生效: {_plain2!r}")
+
+# 图生图但根本没配画师串 → 无需提示（没东西可丢）
+plugin._img2img_inherit_artist = False
+ev_lab3 = _FakeEvent(fail_image_times=0)
+asyncio.run(plugin._send_image_with_info(
+    ev_lab3, fake_img, "夜景", 2.5, None,
+    is_img2img=True, strength=0.6, artist=None,
+))
+_plain3 = [t for k, t in ev_lab3.sent if k == "plain"]
+check(bool(_plain3) and "画师串未生效" not in _plain3[-1],
+      f"没配画师串时不该提示未生效: {_plain3!r}")
+
+# ⑤ 文生图路径不受影响：artist 照旧交给 client.generate，标签不多话
+plugin._img2img_inherit_artist = False
+ev_lab4 = _FakeEvent(fail_image_times=0)
+asyncio.run(plugin._send_image_with_info(
+    ev_lab4, fake_img, "夜景", 2.5, "nai-diffusion-4-5-full",
+    is_img2img=False, strength=None, artist=_ARTIST,
+))
+_plain4 = [t for k, t in ev_lab4.sent if k == "plain"]
+check(bool(_plain4) and "画师串未生效" not in _plain4[-1],
+      f"文生图路径不应出现「画师串未生效」: {_plain4!r}")
+
+# 复位，避免影响后续
+plugin._img2img_inherit_artist = _orig_inherit_artist
+
+# ---------------------------------------------------------------------------
 # 汇总
 # ---------------------------------------------------------------------------
 total = PASSED + len(FAILED)

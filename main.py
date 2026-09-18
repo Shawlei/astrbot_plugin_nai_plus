@@ -462,6 +462,10 @@ class Nai2ApiPlugin(Star):
 
         # 图生图（独立渠道，配置在 img2img 分组里）
         self._img2img_enabled = bool(config.get("img2img_enabled", False))
+        # 图生图是否带上画师串。默认关：图生图渠道多为 OpenAI 风格接口，
+        # 不认 NovelAI 的画师串语法。但绝不能静默丢弃 —— 用户配了画师串却
+        # 看不出为什么没生效，是最难排查的那类问题。
+        self._img2img_inherit_artist = bool(config.get("img2img_inherit_artist", False))
         img2img_conf = config.get("img2img") or {}
         if not isinstance(img2img_conf, dict):
             img2img_conf = {}
@@ -1234,6 +1238,7 @@ class Nai2ApiPlugin(Star):
         *,
         is_img2img: bool = False,
         strength: float | None = None,
+        artist: str | None = None,
     ):
         """发送图片+信息标签。
 
@@ -1247,6 +1252,9 @@ class Nai2ApiPlugin(Star):
             v1.4.2 之前生图和发图包在同一个 try 里，QQ 端 `NodeIKernelMsgService/sendMsg`
             超时（NapCat 的 retcode=1200）也会被记成「[Nai2API] 生图失败」，
             用户以为 NovelAI 挂了，实际是 QQ 客户端发大图慢了一步。
+
+        artist 只用于信息标签：图生图时若画师串没被继承（见
+        img2img_inherit_artist），标签里会补一句「画师串未生效」。
         """
         # 关闭重试时只跑一轮循环（range(1, 2) == [1]）
         retries = self._SEND_RETRIES if self._send_retry_on_timeout else 1
@@ -1279,11 +1287,18 @@ class Nai2ApiPlugin(Star):
             shown_strength = strength
             if is_img2img and shown_strength is None:
                 shown_strength = self.img2img.default_strength
+            # 图生图 + 用户配了画师串 + 却没开启继承 → 画师串本次没过招，
+            # 必须在标签里点出来（静默失效用户根本无从排查）
+            artist_ignored = bool(
+                is_img2img and artist and artist.strip()
+                and not self._img2img_inherit_artist
+            )
             try:
                 await event.send(event.plain_result(
                     self._build_info_label(
                         preset_name, elapsed, model,
                         is_img2img=is_img2img, strength=shown_strength,
+                        artist_ignored=artist_ignored,
                     )
                 ))
             except Exception as e:  # noqa: BLE001
@@ -1309,8 +1324,13 @@ class Nai2ApiPlugin(Star):
     def _build_info_label(
         self, preset_name: str | None, elapsed: float, model: str | None = None,
         *, is_img2img: bool = False, strength: float | None = None,
+        artist_ignored: bool = False,
     ) -> str:
-        """构造信息标签文本，名称超长时截断（防止长串画师串刷屏）"""
+        """构造信息标签文本，名称超长时截断（防止长串画师串刷屏）
+
+        artist_ignored：图生图且本次画师串被丢弃时置 True，标签会补一句
+        「画师串未生效」—— 让「配了画师串却没效果」这件事在界面上说得出口。
+        """
         name = (preset_name or "默认").strip()
         if "," in name or len(name) > 40:
             # 预设名里带逗号说明用户直接写了画师串，只显示简短标识
@@ -1319,6 +1339,8 @@ class Nai2ApiPlugin(Star):
             # 图生图时模型名意义不大（渠道各不同），显示相似度更有用
             extra = f"相似度{strength:.2f}" if strength is not None else "图生图"
             label = f"{name} | 图生图 | {extra} | 耗时{int(elapsed)}秒"
+            if artist_ignored:
+                label += "（画师串未生效）"
             return label
 
         label = f"{name} | 耗时{int(elapsed)}秒"
@@ -1352,8 +1374,22 @@ class Nai2ApiPlugin(Star):
         if ref_image_path:
             with open(ref_image_path, "rb") as f:
                 image_bytes = f.read()
+
+            # 画师串是否拼进图生图提示词，由 img2img_inherit_artist 控制。
+            # 关闭（默认）时不发送，但要记一条日志、并在信息标签里告知用户 ——
+            # 静默失效比不生效更难排查（用户反馈「画师串画出来不对」的根因）。
+            img2img_prompt = prompt
+            if artist and artist.strip():
+                if self._img2img_inherit_artist:
+                    img2img_prompt = f"{artist.strip()}, {prompt}"
+                else:
+                    logger.info(
+                        "[Nai2API] 本次图生图未带画师串（img2img_inherit_artist 关闭）。"
+                        "想让它生效请到插件配置里打开「图生图时带上画师串」"
+                    )
+
             out = await self.img2img.generate(
-                prompt,
+                img2img_prompt,
                 image_bytes,
                 negative=negative,
                 strength=strength,
@@ -1618,6 +1654,7 @@ class Nai2ApiPlugin(Star):
                 event, image_path, preset_name, elapsed, model,
                 is_img2img=bool(ref_image_path),
                 strength=strength,
+                artist=artist,
             )
         except ImageSendError as e:
             logger.error("[Nai2API] 图片已生成但发送失败: %s（文件 %s）", _short_err(e.cause), image_path)
@@ -2047,6 +2084,7 @@ class Nai2ApiPlugin(Star):
                 event, image_path, preset.strip() or None, elapsed, final_model,
                 is_img2img=bool(ref_image_path),
                 strength=strength_val,
+                artist=final_artist,
             )
         except ImageSendError as e:
             logger.error("[Nai2API] 图片已生成但发送失败: %s（文件 %s）", _short_err(e.cause), image_path)
