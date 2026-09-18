@@ -344,15 +344,21 @@ class Nai2ApiPlugin(Star):
                 logger.error("[Nai WebUI] 预览失败: %s", e, exc_info=True)
                 return error_response(f"预览失败: {e}", status_code=500)
 
-        routes = (
-            ("config", api_get_config, ["GET"], "获取预设配置"),
-            ("preset/default", api_set_default_preset, ["POST"], "设置或取消默认预设"),
-            ("presets", api_presets, ["POST"], "预设增删改操作"),
-            ("preview", api_preview, ["POST"], "提示词与预设拼接预览"),
-        )
-        for route, handler, methods, desc in routes:
-            register(route, handler, methods, desc)
-        logger.info("[Nai WebUI] 独立预设管理面板 API 已注册（%d 个接口）", len(routes))
+        endpoint_specs = [
+            ("config", api_get_config, ["GET"], "NovelAI 面板：获取预设配置"),
+            ("preset/default", api_set_default_preset, ["POST"], "NovelAI 面板：设置或取消默认预设"),
+            ("presets", api_presets, ["POST"], "NovelAI 面板：预设增删改操作"),
+            ("preview", api_preview, ["POST"], "NovelAI 面板：提示词与预设拼接预览"),
+        ]
+        registered_count = 0
+        for endpoint, handler, methods, desc in endpoint_specs:
+            for path in (f"/{PLUGIN_NAME}/{endpoint}", endpoint):
+                try:
+                    register(path, handler, methods, desc)
+                    registered_count += 1
+                except Exception as e:
+                    logger.debug("[Nai WebUI] 注册路由 %s 跳过: %s", path, e)
+        logger.info("[Nai WebUI] 独立预设管理面板 API 已注册（%d 个路由项）", registered_count)
 
     async def terminate(self):
         """插件卸载时清理资源"""

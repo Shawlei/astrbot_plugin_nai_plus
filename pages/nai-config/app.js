@@ -1,7 +1,20 @@
 // NovelAI 预设管理面板前端脚本 (AstrBot Plugin Page)
 
 (function () {
-  const bridge = window.AstrBotPluginPage;
+  let bridge = window.AstrBotPluginPage;
+
+  async function resolveBridge(maxRetries = 25, delayMs = 100) {
+    if (bridge && typeof bridge.apiGet === "function") return bridge;
+    for (let i = 0; i < maxRetries; i++) {
+      const b = window.AstrBotPluginPage || (window.parent && window.parent.AstrBotPluginPage);
+      if (b && typeof b.apiGet === "function") {
+        bridge = b;
+        return b;
+      }
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+    return null;
+  }
 
   // 状态
   const state = {
@@ -85,7 +98,10 @@
   // -------------------------------------------------------------------------
 
   async function loadConfig() {
-    if (!bridge || !bridge.apiGet) {
+    if (!bridge || typeof bridge.apiGet !== "function") {
+      bridge = await resolveBridge(10, 80);
+    }
+    if (!bridge || typeof bridge.apiGet !== "function") {
       el.statusChip.textContent = "未连接 Bridge";
       el.statusChip.className = "chip chip-error";
       el.errorBanner.hidden = false;
@@ -447,6 +463,31 @@
   el.previewPrompt.addEventListener("input", updatePreview);
   el.previewPresetSelect.addEventListener("change", updatePreview);
 
-  // 初始化
-  loadConfig();
+  // 初始化流程：先解析 bridge，等待 ready 并监听主题，再加载配置
+  async function init() {
+    el.statusChip.textContent = "连接中…";
+    const b = await resolveBridge();
+    if (b) {
+      if (typeof b.ready === "function") {
+        try {
+          const ctx = await b.ready();
+          if (ctx && ctx.isDark !== undefined) {
+            document.documentElement.setAttribute("data-theme", ctx.isDark ? "dark" : "light");
+          }
+        } catch (e) {
+          console.warn("[Nai WebUI] bridge.ready() error:", e);
+        }
+      }
+      if (typeof b.onContext === "function") {
+        b.onContext((ctx) => {
+          if (ctx && ctx.isDark !== undefined) {
+            document.documentElement.setAttribute("data-theme", ctx.isDark ? "dark" : "light");
+          }
+        });
+      }
+    }
+    await loadConfig();
+  }
+
+  init();
 })();

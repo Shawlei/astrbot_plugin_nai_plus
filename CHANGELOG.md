@@ -1,5 +1,12 @@
 # 更新日志
 
+## v0.1.1 (2026-09-18)
+
+- **修复 WebUI 面板 Bridge 通信与路由问题**：
+  - 前端引入异步 Bridge 轮询解析器（`resolveBridge`）并改用 `type="module"`，确保在 AstrBot 仪表盘 iframe 异步注入 `bridge-sdk.js` 后能稳定建立通信，消除「无法与 AstrBot 建立通信」的提示。
+  - 前端增加 `bridge.ready()` 与 `bridge.onContext()` 主题和生命周期同步。
+  - 后端 Web API 同步注册带有 `/{PLUGIN_NAME}/` 前缀的官方标准路由与相对路由，保证不同 AstrBot 路由转发器都能精确匹配。
+
 ## v0.1.0 (2026-09-18)
 
 - **独立 WebUI 预设管理面板**：
