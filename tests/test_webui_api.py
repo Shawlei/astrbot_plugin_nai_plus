@@ -280,7 +280,7 @@ def call(method: str, endpoint: str, body=None):
 # 4. 路由注册
 # ---------------------------------------------------------------------------
 for m, ep in (("GET", "config"), ("POST", "config/artist"), ("POST", "config/negative"),
-              ("POST", "presets"), ("POST", "preview")):
+              ("POST", "presets"), ("POST", "preset/default"), ("POST", "preview")):
     check((m, f"/{PN}/{ep}") in ctx.routes, f"缺少路由 {m} /{PN}/{ep}")
 
 # ---------------------------------------------------------------------------
@@ -977,6 +977,155 @@ check(bool(_plain4) and "画师串未生效" not in _plain4[-1],
 
 # 复位，避免影响后续
 plugin._img2img_inherit_artist = _orig_inherit_artist
+
+# ---------------------------------------------------------------------------
+# 14. v1.5.0：默认预设（default_preset）+ --no-preset
+# ---------------------------------------------------------------------------
+# 背景：WebUI 预设卡片上的「设为默认画师串」只把**画师串**填进输入框，
+# 附带正向词 / 附带负向词全丢；而且外层是 `if (preset.artist)`，导致
+# 「只有正向/负向词、画师串为空」的预设（v1.4.2 起允许）连按钮都不出现。
+#
+# 改成「默认预设」机制：点一下让整个预设成为默认，三段每次生图自动全部生效。
+
+# ① schema：存在 default_preset，type=string，default=""
+check("default_preset" in schema, "_conf_schema.json 缺 default_preset")
+_dp_cfg = schema.get("default_preset", {})
+check(_dp_cfg.get("type") == "string", "default_preset 应为 string 类型")
+check(_dp_cfg.get("default") == "", "default_preset 默认应为空串（= 不使用）")
+# __init__ 要真的读进来
+check(hasattr(plugin, "_default_preset"), "插件实例应有 _default_preset 属性")
+check(plugin._default_preset == "", f"初始 _default_preset 应为空串: {plugin._default_preset!r}")
+
+# ② _effective_preset 纯逻辑
+_eff = plugin._effective_preset
+_orig_default_preset = plugin._default_preset
+
+# 没写 -p + 配了默认预设 → 返回默认预设名
+plugin._default_preset = "动漫风"
+check(_eff(None) == "动漫风", f"没写 -p 时应套用默认预设: {_eff(None)!r}")
+
+# 写了 -p → 显式优先，覆盖默认（且 --no-preset 不压制它）
+check(_eff("2.5D唯美风") == "2.5D唯美风", f"显式 -p 应覆盖默认预设: {_eff('2.5D唯美风')!r}")
+check(_eff("2.5D唯美风", disabled=True) == "2.5D唯美风",
+      f"显式 -p 应优先于 --no-preset: {_eff('2.5D唯美风', disabled=True)!r}")
+
+# --no-preset（disabled=True）+ 没写 -p → None
+check(_eff(None, disabled=True) is None, "--no-preset 且没写 -p 应返回 None")
+
+# 没配默认预设 + 没写 -p → None
+plugin._default_preset = ""
+check(_eff(None) is None, "没配默认预设且没写 -p 应返回 None")
+
+# 默认预设指向不存在的名字 → None 且不抛错（用户删了预设不该让生图整个坏掉）
+plugin._default_preset = "这个预设根本不存在"
+try:
+    _r = _eff(None)
+    _raised = False
+except Exception as e:  # noqa: BLE001
+    _r, _raised = e, True
+check(not _raised, f"默认预设不存在时不应抛错，实际抛了: {_r!r}")
+check(_r is None, f"默认预设不存在时应按无预设处理: {_r!r}")
+
+# 回归护栏：默认预设是「画师串为空、只有正向/负向词」的预设时仍要命中。
+# 必须用 get_entry() 判断存在性 —— get() 对这类预设返回 ""（不是 None），会漏判。
+plugin.presets.save("只有正向词", "", "", positive="soft glow", negative="dark")
+check(plugin.presets.get("只有正向词") == "",
+      "前置：该类预设 get() 应返回空串（正是漏判的成因）")
+check(plugin.presets.get_entry("只有正向词") is not None, "前置：该类预设 get_entry() 应非 None")
+plugin._default_preset = "只有正向词"
+check(_eff(None) == "只有正向词",
+      f"画师串为空、只有正向/负向词的预设也应能当默认预设: {_eff(None)!r}")
+# 端到端：默认预设的三段都要真的生效
+_p, _n = plugin._apply_preset_extras(_eff(None), "1girl", None)
+check("soft glow" in _p, f"默认预设的附带正向词应生效: {_p!r}")
+check("dark" in (_n or ""), f"默认预设的附带负向词应生效: {_n!r}")
+plugin.presets.delete("只有正向词")
+plugin._default_preset = _orig_default_preset
+
+# ③ --no-preset 解析：能被剥掉、不影响 prompt、且不会被 --artist 吃掉
+_parse = plugin_main._parse_nai_command
+_res = _parse("1girl --no-preset")
+check(len(_res) == 11, f"_parse_nai_command 应返回 11 项: {len(_res)}")
+check(_res[1] == "1girl", f"--no-preset 应从 prompt 里剥掉: {_res[1]!r}")
+check(_res[10] is True, f"force_no_preset 应为 True: {_res[10]!r}")
+
+# 关键回归：--artist 是贪婪匹配，--no-preset 必须在 _STOP_TOKENS 里，
+# 否则会被当成画师串的一部分（main.py 顶部记的那个坑）
+_res2 = _parse("1girl --artist artist:foo, best quality --no-preset")
+check(_res2[3] == "artist:foo, best quality",
+      f"--no-preset 不能被 --artist 吃掉: {_res2[3]!r}")
+check("--no-preset" not in (_res2[3] or ""), f"画师串里不应残留 --no-preset: {_res2[3]!r}")
+check(_res2[10] is True, f"同一句里 force_no_preset 也应为 True: {_res2[10]!r}")
+
+# --negative 同理
+_res3 = _parse("1girl --negative bad hands --no-preset")
+check(_res3[4] == "bad hands", f"--no-preset 不能被 --negative 吃掉: {_res3[4]!r}")
+
+# 不写 --no-preset → False
+check(_parse("1girl")[10] is False, "没写 --no-preset 时 force_no_preset 应为 False")
+# 附带的 -p 与 --no-preset 可以共存（解析层面互不干扰）
+_res4 = _parse("1girl -p 动漫风 --no-preset")
+check(_res4[2] == "动漫风" and _res4[10] is True,
+      f"-p 与 --no-preset 应能共存: {(_res4[2], _res4[10])!r}")
+
+# ④ 两条路径一致性护栏：/nai 指令 与 LLM 工具 都必须经过 _effective_preset
+# （各写各的正是 v1.4.6 之前图生图画师串丢失的成因）
+_src = (ROOT / "main.py").read_text(encoding="utf-8")
+check("preset_name = self._effective_preset(preset_name, disabled=force_no_preset)" in _src,
+      "「/nai 指令」路径必须经过 _effective_preset（带 --no-preset 语义）")
+check('preset = self._effective_preset(preset.strip() or None) or ""' in _src,
+      "「LLM 工具」路径也必须经过 _effective_preset")
+# 定义 1 次 + 调用 2 次
+check(_src.count("self._effective_preset(") >= 2,
+      "main.py 里 _effective_preset 的调用点应至少 2 处（两条调用链）")
+
+# ⑤ WebUI：GET config 带 default_preset，且 version 不再是写死的旧值
+r = call("GET", "config")
+check("default_preset" in r.body, "GET config 应返回 default_preset 字段")
+check(r.body.get("default_preset") == "", f"初始 default_preset 应为空串: {r.body.get('default_preset')!r}")
+_meta_ver = ""
+for _ln in (ROOT / "metadata.yaml").read_text(encoding="utf-8").splitlines():
+    if _ln.strip().startswith("version:"):
+        _meta_ver = _ln.split(":", 1)[1].strip()
+        break
+check(r.body.get("version") == _meta_ver,
+      f"面板 version 应来自 metadata.yaml（{_meta_ver!r}），实际 {r.body.get('version')!r}")
+check(r.body.get("version") != "1.4.3",
+      "面板 version 不应再是写死的旧值 1.4.3")
+
+# ⑥ WebUI：POST preset/default 三态
+_BINSYS = "动漫风"
+before_saves = len(plugin_cfg.save_calls)
+r = call("POST", "preset/default", {"name": _BINSYS})
+check(r.status_code == 200 and r.body.get("saved") is True, f"设置默认预设失败: {r.body!r}")
+check(r.body.get("default_preset") == _BINSYS, f"返回的 default_preset 不对: {r.body!r}")
+check(plugin._default_preset == _BINSYS, f"内存 _default_preset 未同步: {plugin._default_preset!r}")
+check(plugin_cfg.get("default_preset") == _BINSYS, f"配置未写入 default_preset: {plugin_cfg.get('default_preset')!r}")
+check(len(plugin_cfg.save_calls) > before_saves, "应至少调用一次 save_config_async")
+# 落盘（FakePluginConfig 会写 config_path）
+_disk_cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+check(_disk_cfg.get("default_preset") == _BINSYS, f"default_preset 未落盘: {_disk_cfg.get('default_preset')!r}")
+
+# 再查 GET：应能读回刚设的默认预设
+r = call("GET", "config")
+check(r.body.get("default_preset") == _BINSYS, f"GET config 应读回默认预设: {r.body.get('default_preset')!r}")
+
+# 空 name = 取消默认
+r = call("POST", "preset/default", {"name": ""})
+check(r.status_code == 200 and r.body.get("default_preset") == "", f"取消默认失败: {r.body!r}")
+check(plugin._default_preset == "", f"取消后内存应为空串: {plugin._default_preset!r}")
+check(plugin_cfg.get("default_preset") == "", f"取消后配置应为空串: {plugin_cfg.get('default_preset')!r}")
+check(call("GET", "config").body.get("default_preset") == "", "取消后 GET 应为空串")
+
+# 不存在的预设名 → 400，且**配置未被写入**（不能让配置里存一个坏名字）
+r = call("POST", "preset/default", {"name": "压根不存在"})
+check(r.status_code == 400, f"不存在的预设名应返回 400: {r.status_code}")
+check("不存在" in str(r.body.get("message", "")), f"错误文案应说明预设不存在: {r.body!r}")
+check(plugin_cfg.get("default_preset") == "", f"校验失败时不得写入配置: {plugin_cfg.get('default_preset')!r}")
+check(plugin._default_preset == "", f"校验失败时不得改内存: {plugin._default_preset!r}")
+
+# 复位
+plugin._default_preset = _orig_default_preset
 
 # ---------------------------------------------------------------------------
 # 汇总

@@ -52,6 +52,7 @@ const state = {
   defaults: { artist: "", negative: "" },
   savedArtist: "",
   savedNegative: "",
+  defaultPreset: "", // 配置里的「默认预设」名，空串 = 未设置
   customPresets: [],
   builtinPresets: [],
   editingName: null, // null = 新增；否则为正在编辑的预设名
@@ -71,6 +72,8 @@ const els = {
   artistQuick: $("artist-quick"),
   resetArtist: $("reset-artist"),
   saveArtist: $("save-artist"),
+  defaultPresetStatus: $("default-preset-status"),
+  defaultPresetName: $("default-preset-name"),
 
   negativeInput: $("negative-input"),
   negativeCount: $("negative-count"),
@@ -205,6 +208,13 @@ function refreshNegativeMeta() {
   els.negativeCount.textContent = v.length;
   els.negativeTags.textContent = countTags(v);
   els.negativeDirty.hidden = v.trim() === state.savedNegative.trim();
+}
+
+// 默认预设状态行：让人一眼知道每次生图实际套的是哪个预设
+function renderDefaultPresetStatus() {
+  const name = state.defaultPreset || "";
+  els.defaultPresetName.textContent = name || "未设置";
+  els.defaultPresetStatus.classList.toggle("is-set", Boolean(name));
 }
 
 async function saveArtist() {
@@ -371,6 +381,11 @@ function createPresetCard(preset, { builtin }) {
   const card = document.createElement("div");
   card.className = `preset-card${builtin ? " preset-card-builtin" : ""}`;
 
+  const isDefault = Boolean(state.defaultPreset) && state.defaultPreset === preset.name;
+  if (isDefault) {
+    card.classList.add("preset-card-default");
+  }
+
   const header = document.createElement("div");
   header.className = "preset-card-header";
 
@@ -383,6 +398,13 @@ function createPresetCard(preset, { builtin }) {
     const badge = document.createElement("span");
     badge.className = "badge";
     badge.textContent = "内置";
+    nameWrap.appendChild(badge);
+  }
+  if (isDefault) {
+    const badge = document.createElement("span");
+    badge.className = "badge badge-default";
+    badge.textContent = "默认";
+    badge.title = "每次生图会自动套用这个预设";
     nameWrap.appendChild(badge);
   }
   // 小标记：这个预设带了哪几段，一眼看出来
@@ -405,18 +427,19 @@ function createPresetCard(preset, { builtin }) {
   const actions = document.createElement("div");
   actions.className = "preset-card-actions";
 
-  if (preset.artist) {
+  // 三段任意一段非空就值得设成默认 —— v1.4.2 起允许「只有正向/负向词、
+  // 画师串为空」的预设，旧代码用 `if (preset.artist)` 会让这类预设连按钮都没有
+  if (preset.artist || preset.positive || preset.negative) {
     const useBtn = document.createElement("button");
     useBtn.type = "button";
     useBtn.className = "btn btn-ghost btn-xs";
-    useBtn.textContent = "设为默认画师串";
-    useBtn.title = "把这个预设的画师串填进上面的「画师串」框（需再点保存）";
-    useBtn.addEventListener("click", () => {
-      els.artistInput.value = preset.artist || "";
-      refreshArtistMeta();
-      window.scrollTo({ top: 0, behavior: "smooth" });
-      showToast(`已填入「${preset.name}」的画师串，记得点「保存画师串」`, "info");
-    });
+    useBtn.textContent = isDefault ? "取消默认" : "设为默认风格";
+    useBtn.title = isDefault
+      ? "取消默认：之后生图不再自动套用这个预设"
+      : "设为默认：之后每次生图自动套用它的画师串 + 附带正向词 + 附带负向词";
+    useBtn.addEventListener("click", () =>
+      setDefaultPreset(isDefault ? "" : preset.name)
+    );
     actions.appendChild(useBtn);
   }
 
@@ -507,6 +530,25 @@ function renderPresets() {
   renderPreviewPresetOptions();
 }
 
+// 设为 / 取消默认预设。name 为空 = 取消。
+// 成功后就地更新 state 并重绘，不再整页拉配置（省一次往返，且不会打断用户）。
+async function setDefaultPreset(name) {
+  try {
+    const res = await bridge.apiPost("preset/default", { name });
+    state.defaultPreset = res.default_preset || "";
+    renderDefaultPresetStatus();
+    renderPresets();
+    showToast(
+      state.defaultPreset
+        ? `已把「${state.defaultPreset}」设为默认风格，之后每次生图自动套用它的三段`
+        : "已取消默认预设",
+      "success"
+    );
+  } catch (err) {
+    showToast(`设置失败：${err.message}`, "error");
+  }
+}
+
 function openModal(preset, editingName) {
   state.editingName = editingName;
   els.modalTitle.textContent = editingName ? `编辑预设「${editingName}」` : "新增预设";
@@ -592,6 +634,7 @@ async function loadConfig() {
     state.defaults.negative = res.defaults?.negative || "";
     state.savedArtist = res.artist || "";
     state.savedNegative = res.negative || "";
+    state.defaultPreset = res.default_preset || "";
     state.customPresets = res.custom_presets || [];
     state.builtinPresets = res.builtin_presets || [];
 
@@ -599,6 +642,7 @@ async function loadConfig() {
     els.negativeInput.value = state.savedNegative;
     refreshArtistMeta();
     refreshNegativeMeta();
+    renderDefaultPresetStatus();
     renderPresets();
     hideBanner();
     setStatus(`已连接 · v${res.version || "?"}`, true);

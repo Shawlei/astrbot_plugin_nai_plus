@@ -92,14 +92,18 @@ _NOISE_PATTERN = re.compile(r'--noise\s+(\d*\.?\d+)', re.IGNORECASE)
 # 强制开关：不接参数的裸标志位
 _FORCE_I2I_PATTERN = re.compile(r'(?:^|\s)--i2i(?=\s|$)', re.IGNORECASE)
 _FORCE_T2I_PATTERN = re.compile(r'(?:^|\s)--no-i2i(?=\s|$)', re.IGNORECASE)
+# --no-preset：本次不使用「默认预设」（显式 -p 仍然优先）
+_NO_PRESET_PATTERN = re.compile(r'(?:^|\s)--no-preset(?=\s|$)', re.IGNORECASE)
 
 # 「贪婪参数」的终止边界。--artist / --negative 的值会一直读到下一个参数名为止，
 # 所以每新增一个带值的参数，都必须加进这个列表，否则会被前面的贪婪匹配吃掉。
 #
 # 踩坑记录：加了 --strength 却忘了改这里，`--artist a, b --strength 0.7`
 # 会把整个 "--strength 0.7" 当成 artist 的一部分。
+# 同理 --no-preset 也要加进来，否则 `--artist a, b --no-preset` 会把
+# "--no-preset" 当成画师串的一部分。
 _STOP_TOKENS = (
-    r'--negative|--artist|-p|--preset|-m|--model|--seed|--strength|--noise|--i2i|--no-i2i'
+    r'--negative|--artist|-p|--preset|-m|--model|--seed|--strength|--noise|--i2i|--no-i2i|--no-preset'
 )
 _ARTIST_PATTERN = re.compile(
     rf'--artist\s+(.+?)(?=\s+(?:{_STOP_TOKENS})\s+|$)', re.DOTALL
@@ -112,6 +116,9 @@ _NEGATIVE_PATTERN = re.compile(
 HELP_TEXT = (
     "用法: /{cmd} [尺寸] <提示词> [-p <预设>] [-m <模型>] [--artist <质量前缀>] [--negative <负面>] [--seed <种子>]\n"
     "预设: /{cmd} presets(预设) | /{cmd} save(保存) <名称> <质量前缀> | /{cmd} update(修改) <名称> <新前缀> | /{cmd} del(删除) <名称>\n"
+    "默认预设: 配置项「默认预设」填了名字后，每次生图自动套用它（画师串+正向词+负向词）\n"
+    "  -p <预设>   临时改用别的预设（优先于默认预设）\n"
+    "  --no-preset 本次完全不用预设\n"
     "余额: /{cmd} balance(余额/点数/次数)\n"
     "词库: /{cmd} dict(词库) 查看状态 | /{cmd} dict(词库) <文本> 测试命中情况\n"
     "尺寸: 竖图|横图|方图|2K竖图|2K横图|2K方图|4K竖图|4K横图|4K方图\n"
@@ -136,6 +143,7 @@ HELP_TEXT = (
     "  /{cmd} 1girl --artist best quality, absurdres\n"
     "  /{cmd} 1girl --negative bad anatomy, bad hands\n"
     "  /{cmd} 1girl --seed 12345\n"
+    "  /{cmd} 1girl --no-preset                        (本次不用默认预设)\n"
     "  (回复一张图) /{cmd} 换个背景 --strength 0.6      (图生图)\n"
     "  /{cmd} save 我的预设 best quality, absurdres, detailed\n"
     "  /{cmd} 保存 我的预设 best quality, absurdres, detailed\n"
@@ -149,7 +157,7 @@ HELP_TEXT = (
 
 def _parse_nai_command(text: str) -> tuple[
     str | None, str, str | None, str | None, str | None, int | None, str | None,
-    float | None, float | None, bool | None,
+    float | None, float | None, bool | None, bool,
 ]:
     """
     解析 /nai 指令的参数。
@@ -158,16 +166,19 @@ def _parse_nai_command(text: str) -> tuple[
         /nai [尺寸] <提示词> [-p <预设>] [-m <模型>] [--artist <质量前缀>]
              [--negative <负面提示词>] [--seed <种子>]
              [--strength <相似度>] [--noise <降噪>] [--i2i | --no-i2i]
+             [--no-preset]
 
     参数顺序可以任意，但 --artist / --negative 的值会一直读到下一个
     "参数名"为止，所以这两个建议写在最后。
 
     Returns:
         (size, prompt, preset_name, artist, negative, seed, model,
-         strength, noise, force_i2i)
+         strength, noise, force_i2i, force_no_preset)
 
         force_i2i: True = 强制走图生图；False = 强制走文生图；None = 自动判断
                    （自动判断的规则是「回复消息里有没有图」）
+        force_no_preset: True = 用户写了 --no-preset，本次不用「默认预设」。
+                   注意它**不压制**显式 -p —— 显式指定的预设永远优先。
     """
     text = text.strip()
     size = None
@@ -224,6 +235,15 @@ def _parse_nai_command(text: str) -> tuple[
             force_i2i = True
             text = text[:m.start()] + text[m.end():]
 
+    # 提取 --no-preset（本次不用默认预设的裸标志位）。
+    # 必须放在 --artist / --negative 之前剥掉：虽然 --no-preset 已在 _STOP_TOKENS
+    # 里能挡住贪婪匹配，但标志位本身还得从 text 里删掉，否则会混进提示词。
+    force_no_preset = False
+    m = _NO_PRESET_PATTERN.search(text)
+    if m:
+        force_no_preset = True
+        text = text[:m.start()] + text[m.end():]
+
     # 提取负面提示词
     negative = None
     m = _NEGATIVE_PATTERN.search(text)
@@ -241,7 +261,7 @@ def _parse_nai_command(text: str) -> tuple[
     prompt = text.strip()
     return (
         size, prompt, preset_name, artist, negative, seed, model,
-        strength, noise, force_i2i,
+        strength, noise, force_i2i, force_no_preset,
     )
 
 
@@ -453,6 +473,10 @@ class Nai2ApiPlugin(Star):
             self.data_dir, webui_presets=config.get("custom_presets", [])
         )
 
+        # 默认预设：填了预设名后，每次生图自动套用它的三段内容
+        # （画师串 + 附带正向词 + 附带负向词），不用每次写 -p
+        self._default_preset = str(config.get("default_preset", "") or "").strip()
+
         # 提示词直译（中文/英文 → 英文标签）
         self.translator = TranslateManager(config, context)
         self._translate_enabled = bool(config.get("translate_enabled", True))
@@ -522,9 +546,10 @@ class Nai2ApiPlugin(Star):
             `save_config_async()` 会写到正确的文件。
 
         接口一览（bridge 端 endpoint 不带插件名前缀）：
-            GET  config                 读取画师串 / 负向词 / 自定义预设 / 内置预设 / 默认值
+            GET  config                 读取画师串 / 负向词 / 默认预设 / 自定义预设 / 内置预设 / 默认值
             POST config/artist          保存画师串           {"value": "..."}
             POST config/negative        保存负向词           {"value": "..."}
+            POST preset/default         设置默认预设         {"name": "..."}（空 = 取消）
             POST presets                预设增删改           {"action": "add|update|delete", "data": {...}}
             POST preview                预览最终拼接结果      {"prompt": "...", "artist": "...", "negative": "..."}
 
@@ -575,6 +600,24 @@ class Nai2ApiPlugin(Star):
             except Exception as e:  # 文件被改坏也不能影响接口
                 logger.debug("[Nai WebUI] 读取 schema 默认值失败，使用内置常量: %s", e)
             return defaults
+
+        def _plugin_version() -> str:
+            """从 metadata.yaml 读版本号，给面板显示用。
+
+            以前这里是写死的 "1.4.3"，插件一路升到 1.4.6 面板还显示旧的，
+            用户照着面板报版本号会给排查带偏。改成读 metadata.yaml，
+            读失败就退回常量 —— 绝不抛错（版本号显示错不是致命问题）。
+            """
+            meta_path = Path(__file__).parent / "metadata.yaml"
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        m = re.match(r"\s*version:\s*['\"]?([^'\"\s]+)", line)
+                        if m:
+                            return m.group(1)
+            except Exception as e:  # 文件缺失 / 权限问题都不该影响接口
+                logger.debug("[Nai WebUI] 读取 metadata.yaml 版本号失败: %s", e)
+            return "unknown"
 
         async def _save_plugin_config(patch: dict) -> bool:
             """把改动写进插件自己的配置文件。
@@ -646,6 +689,7 @@ class Nai2ApiPlugin(Star):
                     {
                         "artist": str(cfg.get("default_artist", "") or ""),
                         "negative": str(cfg.get("default_negative", "") or ""),
+                        "default_preset": str(cfg.get("default_preset", "") or ""),
                         "auto_composition": bool(cfg.get("auto_composition", True)),
                         "quality_weight": bool(cfg.get("translate_quality_weight", True)),
                         "quality_weight_value": str(cfg.get("translate_quality_weight_value", "1.2") or "1.2"),
@@ -655,7 +699,7 @@ class Nai2ApiPlugin(Star):
                         },
                         "custom_presets": _custom_presets_payload(),
                         "builtin_presets": _builtin_presets_payload(),
-                        "version": "1.4.3",
+                        "version": _plugin_version(),
                     }
                 )
             except Exception as e:
@@ -685,6 +729,28 @@ class Nai2ApiPlugin(Star):
                 return json_response({"saved": True, "negative": value})
             except Exception as e:
                 logger.error("[Nai WebUI] 保存负向词失败: %s", e, exc_info=True)
+                return error_response(f"保存失败: {e}", status_code=500)
+
+        async def api_set_default_preset():
+            """POST preset/default  {"name": "xxx"}
+
+            name 为空 = 取消默认预设。
+
+            非空时先校验预设存在（内置 + 自定义都算），不存在就返回 400 且
+            **不写配置** —— 让配置里存一个不存在的名字，用户每次生图都会看到
+            「默认预设不存在」的告警，还找不到是哪儿设置的，特别难排查。
+            """
+            try:
+                payload = await request.json(default={}) or {}
+                name = str(payload.get("name", "") or "").strip()
+                if name and self.presets.get_entry(name) is None:
+                    return error_response(f"预设「{name}」不存在，无法设为默认", status_code=400)
+                await _save_plugin_config({"default_preset": name})
+                # 让当前进程立刻生效，不用等重载
+                self._default_preset = name
+                return json_response({"saved": True, "default_preset": name})
+            except Exception as e:
+                logger.error("[Nai WebUI] 设置默认预设失败: %s", e, exc_info=True)
                 return error_response(f"保存失败: {e}", status_code=500)
 
         async def api_presets():
@@ -811,6 +877,7 @@ class Nai2ApiPlugin(Star):
             (f"/{PLUGIN_NAME}/config/artist", api_save_artist, ["POST"], "NovelAI 面板：保存画师串"),
             (f"/{PLUGIN_NAME}/config/negative", api_save_negative, ["POST"], "NovelAI 面板：保存负向词"),
             (f"/{PLUGIN_NAME}/presets", api_presets, ["POST"], "NovelAI 面板：预设增删改"),
+            (f"/{PLUGIN_NAME}/preset/default", api_set_default_preset, ["POST"], "NovelAI 面板：设置默认预设"),
             (f"/{PLUGIN_NAME}/preview", api_preview, ["POST"], "NovelAI 面板：预览拼接结果"),
         )
         try:
@@ -1041,6 +1108,26 @@ class Nai2ApiPlugin(Star):
         if current and current not in models:
             models.insert(0, current)
         return models
+
+    def _effective_preset(self, preset_name: str | None, *, disabled: bool = False) -> str | None:
+        """把「用户没写 -p」解析成「默认预设」。
+
+        两条调用链（/nai 指令 与 LLM 工具）都必须走这里 —— 各写各的正是
+        之前图生图画师串丢失的成因。
+        默认预设指向一个已被删掉的预设时，按「无预设」处理并告警，绝不抛错：
+        用户删个预设不该让生图整个坏掉（容错底线：代价只能是该功能不生效）。
+        """
+        if preset_name:          # 显式 -p 永远优先，--no-preset 不压制它
+            return preset_name
+        if disabled:             # --no-preset：本次不用默认预设
+            return None
+        name = self._default_preset
+        if not name:
+            return None
+        if self.presets.get_entry(name) is None:
+            logger.warning("[Nai2API] 默认预设 '%s' 不存在，本次按无预设处理", name)
+            return None
+        return name
 
     def _resolve_artist(self, preset_name: str | None, artist: str | None) -> str | None:
         """解析 artist：预设优先，--artist 覆盖预设。
@@ -1523,11 +1610,16 @@ class Nai2ApiPlugin(Star):
 
         (
             size, prompt, preset_name, artist, negative, seed, model,
-            strength, noise, force_i2i,
+            strength, noise, force_i2i, force_no_preset,
         ) = _parse_nai_command(args)
 
         if not prompt:
             return event.plain_result("提示词不能为空")
+
+        # 默认预设：用户没写 -p 时套用配置里的「默认预设」。
+        # 必须放在 _resolve_artist 和「预设不存在」检查之前 —— 两者都要看
+        # 最终生效的 preset_name，否则默认预设的附带三段根本不会生效。
+        preset_name = self._effective_preset(preset_name, disabled=force_no_preset)
 
         # 解析 artist（预设 + --artist 优先级）
         final_artist = self._resolve_artist(preset_name, artist)
@@ -2030,6 +2122,11 @@ class Nai2ApiPlugin(Star):
             return mcp.types.CallToolResult(
                 content=[mcp.types.TextContent(type="text", text=result_text)]
             )
+
+        # 默认预设：LLM 没给 preset 参数时，套用配置里的「默认预设」。
+        # 必须和 /nai 指令路径走同一个 _effective_preset（各写各的正是
+        # 之前图生图画师串丢失的成因）。工具没有 --no-preset。
+        preset = self._effective_preset(preset.strip() or None) or ""
 
         final_artist = self._resolve_artist(
             preset.strip() or None,

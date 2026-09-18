@@ -546,6 +546,32 @@ code {
   color: var(--primary);
 }
 
+/* 「默认」徽章：和「内置」区分开，用成功色 */
+.badge-default {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+/* 当前默认预设的卡片描边高亮，列表里一眼能找到 */
+.preset-card-default {
+  border-color: var(--success);
+  box-shadow: inset 0 0 0 1px var(--success-soft);
+}
+
+/* 「当前默认预设：xxx」状态行 */
+.default-preset-status {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.default-preset-status strong {
+  color: var(--text-2);
+  font-weight: 600;
+}
+.default-preset-status.is-set strong {
+  color: var(--success);
+}
+
 .preset-card-actions {
   display: flex;
   gap: 2px;
