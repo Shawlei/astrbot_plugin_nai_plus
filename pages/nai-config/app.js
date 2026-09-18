@@ -1,0 +1,452 @@
+// NovelAI 预设管理面板前端脚本 (AstrBot Plugin Page)
+
+(function () {
+  const bridge = window.AstrBotPluginPage;
+
+  // 状态
+  const state = {
+    presets: [],
+    defaultPreset: "",
+    filter: "all",
+    search: "",
+    editingName: null, // null 表示新建，string 表示正在编辑已有预设
+  };
+
+  // DOM 元素引用
+  const el = {
+    statusChip: document.getElementById("status-chip"),
+    reloadBtn: document.getElementById("reload-btn"),
+    errorBanner: document.getElementById("error-banner"),
+    defaultBanner: document.getElementById("default-preset-banner"),
+    currentDefaultName: document.getElementById("current-default-name"),
+    currentDefaultTip: document.getElementById("current-default-tip"),
+    clearDefaultBtn: document.getElementById("clear-default-btn"),
+    presetList: document.getElementById("preset-list"),
+    btnCreatePreset: document.getElementById("btn-create-preset"),
+    presetSearch: document.getElementById("preset-search"),
+    filterChips: document.querySelectorAll(".filter-chip"),
+
+    // 预览
+    previewPrompt: document.getElementById("preview-prompt"),
+    previewPresetSelect: document.getElementById("preview-preset-select"),
+    previewArtistVal: document.getElementById("preview-artist-val"),
+    previewTagVal: document.getElementById("preview-tag-val"),
+    previewNegVal: document.getElementById("preview-neg-val"),
+
+    // 弹窗
+    modal: document.getElementById("preset-modal"),
+    modalTitle: document.getElementById("modal-title"),
+    modalCloseBtn: document.getElementById("modal-close-btn"),
+    modalCancelBtn: document.getElementById("modal-cancel-btn"),
+    modalSaveBtn: document.getElementById("modal-save-btn"),
+    modalName: document.getElementById("modal-preset-name"),
+    modalDesc: document.getElementById("modal-preset-desc"),
+    modalArtist: document.getElementById("modal-preset-artist"),
+    modalPositive: document.getElementById("modal-preset-positive"),
+    modalNegative: document.getElementById("modal-preset-negative"),
+    modalSetDefault: document.getElementById("modal-set-default"),
+
+    toastContainer: document.getElementById("toast-container"),
+  };
+
+  // -------------------------------------------------------------------------
+  // 工具函数
+  // -------------------------------------------------------------------------
+
+  function showToast(message, type = "success") {
+    const toast = document.createElement("div");
+    toast.className = `toast toast-${type}`;
+    toast.textContent = message;
+    el.toastContainer.appendChild(toast);
+    setTimeout(() => {
+      toast.style.opacity = "0";
+      toast.style.transform = "translateY(-10px)";
+      toast.style.transition = "all 0.2s ease";
+      setTimeout(() => toast.remove(), 200);
+    }, 2800);
+  }
+
+  function appendTagToTextarea(textarea, tag) {
+    let current = textarea.value.trim();
+    if (!current) {
+      textarea.value = tag;
+      return;
+    }
+    const tags = current.split(",").map((s) => s.trim().toLowerCase());
+    if (tags.includes(tag.toLowerCase())) {
+      showToast(`标签 "${tag}" 已存在`, "warning");
+      return;
+    }
+    textarea.value = current.replace(/,\s*$/, "") + ", " + tag;
+  }
+
+  // -------------------------------------------------------------------------
+  // 数据加载与渲染
+  // -------------------------------------------------------------------------
+
+  async function loadConfig() {
+    if (!bridge || !bridge.apiGet) {
+      el.statusChip.textContent = "未连接 Bridge";
+      el.statusChip.className = "chip chip-error";
+      el.errorBanner.hidden = false;
+      el.errorBanner.textContent = "无法与 AstrBot 建立通信，请在 AstrBot 面板中打开此页面。";
+      return;
+    }
+
+    try {
+      el.statusChip.textContent = "读取中…";
+      const data = await bridge.apiGet("config");
+      state.presets = data.presets || [];
+      state.defaultPreset = data.default_preset || "";
+
+      el.statusChip.textContent = `已连接 (v${data.version || "0.0.1"})`;
+      el.statusChip.className = "chip chip-connected";
+      el.errorBanner.hidden = true;
+
+      renderDefaultPresetBanner();
+      renderPresetList();
+      renderPreviewSelect();
+      updatePreview();
+    } catch (err) {
+      console.error("加载配置失败:", err);
+      el.statusChip.textContent = "读取失败";
+      el.statusChip.className = "chip chip-error";
+      el.errorBanner.hidden = false;
+      el.errorBanner.textContent = `读取插件配置失败: ${err.message || err}`;
+    }
+  }
+
+  function renderDefaultPresetBanner() {
+    if (state.defaultPreset) {
+      el.currentDefaultName.textContent = `【${state.defaultPreset}】`;
+      el.currentDefaultTip.textContent = "（普通生图未指定 -p 时自动套用此画风）";
+      el.clearDefaultBtn.style.display = "inline-flex";
+    } else {
+      el.currentDefaultName.textContent = "未设置";
+      el.currentDefaultTip.textContent = "（生图未指定 -p 时使用常规默认画师串）";
+      el.clearDefaultBtn.style.display = "none";
+    }
+  }
+
+  function renderPresetList() {
+    const query = state.search.trim().toLowerCase();
+    const filtered = state.presets.filter((p) => {
+      // 类别筛选
+      if (state.filter === "builtin" && !p.is_builtin) return false;
+      if (state.filter === "custom" && p.is_builtin) return false;
+      // 关键字搜索
+      if (query) {
+        const text = [p.name, p.desc, p.artist, p.positive, p.negative].join(" ").toLowerCase();
+        if (!text.includes(query)) return false;
+      }
+      return true;
+    });
+
+    if (filtered.length === 0) {
+      el.presetList.innerHTML = `<div class="loading-placeholder">无匹配的预设</div>`;
+      return;
+    }
+
+    el.presetList.innerHTML = filtered
+      .map((p) => {
+        const isDefault = p.name === state.defaultPreset;
+        const defaultBadge = isDefault ? `<span class="badge badge-default">★ 默认预设</span>` : "";
+        const typeBadge = p.is_builtin
+          ? `<span class="badge badge-builtin">官方内置</span>`
+          : `<span class="badge badge-custom">自定义</span>`;
+
+        return `
+          <div class="preset-card ${isDefault ? "is-default" : ""}" data-name="${escapeHtml(p.name)}">
+            <div class="preset-card-head">
+              <div class="preset-card-title">
+                <h3>${escapeHtml(p.name)}</h3>
+                ${defaultBadge}
+                ${typeBadge}
+              </div>
+            </div>
+            ${p.desc ? `<div class="preset-card-desc">${escapeHtml(p.desc)}</div>` : ""}
+
+            <div class="preset-card-body">
+              <div class="preset-segment">
+                <div class="segment-label">🎨 质量词 / 画师串 (artist)</div>
+                <div class="segment-text ${!p.artist ? "empty" : ""}" title="${escapeHtml(p.artist || "（留空）")}">
+                  ${escapeHtml(p.artist || "（留空）")}
+                </div>
+              </div>
+
+              <div class="preset-segment">
+                <div class="segment-label">➕ 附带正向词 (positive)</div>
+                <div class="segment-text ${!p.positive ? "empty" : ""}" title="${escapeHtml(p.positive || "（无）")}">
+                  ${escapeHtml(p.positive || "（无）")}
+                </div>
+              </div>
+
+              <div class="preset-segment">
+                <div class="segment-label">➖ 附带负向词 (negative)</div>
+                <div class="segment-text ${!p.negative ? "empty" : ""}" title="${escapeHtml(p.negative || "（无）")}">
+                  ${escapeHtml(p.negative || "（无）")}
+                </div>
+              </div>
+            </div>
+
+            <div class="preset-card-footer">
+              <div class="footer-actions-left">
+                ${
+                  isDefault
+                    ? `<button class="btn btn-secondary btn-sm btn-clear-def" data-name="${escapeHtml(p.name)}">取消默认</button>`
+                    : `<button class="btn btn-gold btn-sm btn-set-def" data-name="${escapeHtml(p.name)}">★ 设为默认</button>`
+                }
+              </div>
+              <div class="footer-actions-right">
+                ${
+                  p.is_builtin
+                    ? `<button class="btn btn-secondary btn-sm btn-copy-preset" data-name="${escapeHtml(p.name)}" title="基于此预设复制新建">复制新建</button>`
+                    : `
+                      <button class="btn btn-secondary btn-sm btn-edit-preset" data-name="${escapeHtml(p.name)}">编辑</button>
+                      <button class="btn btn-danger btn-sm btn-del-preset" data-name="${escapeHtml(p.name)}">删除</button>
+                    `
+                }
+              </div>
+            </div>
+          </div>
+        `;
+      })
+      .join("");
+  }
+
+  function renderPreviewSelect() {
+    const currentVal = el.previewPresetSelect.value;
+    el.previewPresetSelect.innerHTML = state.presets
+      .map((p) => {
+        const isDef = p.name === state.defaultPreset ? " (默认)" : "";
+        return `<option value="${escapeHtml(p.name)}">${escapeHtml(p.name)}${isDef}</option>`;
+      })
+      .join("");
+
+    // 优先保持当前选择，没有的话默认选当前默认预设或第一项
+    if (currentVal && state.presets.some((p) => p.name === currentVal)) {
+      el.previewPresetSelect.value = currentVal;
+    } else if (state.defaultPreset) {
+      el.previewPresetSelect.value = state.defaultPreset;
+    }
+  }
+
+  async function updatePreview() {
+    if (!bridge || !bridge.apiPost) return;
+    const prompt = el.previewPrompt.value.trim();
+    const preset = el.previewPresetSelect.value;
+    if (!preset) return;
+
+    try {
+      const res = await bridge.apiPost("preview", {
+        prompt: prompt || "1girl",
+        preset: preset,
+      });
+
+      el.previewArtistVal.textContent = res.artist || "（未设置画师串）";
+      el.previewTagVal.textContent = res.tag || prompt || "（空）";
+      el.previewNegVal.textContent = res.negative || "（空）";
+    } catch (err) {
+      console.error("生成预览失败:", err);
+    }
+  }
+
+  function escapeHtml(str) {
+    if (!str) return "";
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  // -------------------------------------------------------------------------
+  // 预设操作（设默认、增、删、改）
+  // -------------------------------------------------------------------------
+
+  async function setDefaultPreset(name) {
+    try {
+      await bridge.apiPost("preset/default", { name });
+      state.defaultPreset = name;
+      showToast(name ? `已将预设「${name}」设为默认` : "已取消默认预设");
+      renderDefaultPresetBanner();
+      renderPresetList();
+      renderPreviewSelect();
+      updatePreview();
+    } catch (err) {
+      showToast(`设置默认预设失败: ${err.message || err}`, "error");
+    }
+  }
+
+  async function deletePreset(name) {
+    if (!confirm(`确定要删除自定义预设「${name}」吗？此操作不可恢复。`)) {
+      return;
+    }
+    try {
+      await bridge.apiPost("presets", {
+        action: "delete",
+        data: { name },
+      });
+      showToast(`预设「${name}」已删除`);
+      await loadConfig();
+    } catch (err) {
+      showToast(`删除预设失败: ${err.message || err}`, "error");
+    }
+  }
+
+  function openModalForCreate(copyFrom = null) {
+    state.editingName = null;
+    el.modalTitle.textContent = copyFrom ? `复制预设 (${copyFrom.name})` : "新建预设";
+    el.modalName.value = copyFrom ? `${copyFrom.name}_副本` : "";
+    el.modalName.disabled = false;
+    el.modalDesc.value = copyFrom ? copyFrom.desc || "" : "";
+    el.modalArtist.value = copyFrom ? copyFrom.artist || "" : "";
+    el.modalPositive.value = copyFrom ? copyFrom.positive || "" : "";
+    el.modalNegative.value = copyFrom ? copyFrom.negative || "" : "";
+    el.modalSetDefault.checked = false;
+    el.modal.hidden = false;
+    el.modalName.focus();
+  }
+
+  function openModalForEdit(preset) {
+    state.editingName = preset.name;
+    el.modalTitle.textContent = `编辑预设「${preset.name}」`;
+    el.modalName.value = preset.name;
+    el.modalName.disabled = true; // 名称作为键不可改
+    el.modalDesc.value = preset.desc || "";
+    el.modalArtist.value = preset.artist || "";
+    el.modalPositive.value = preset.positive || "";
+    el.modalNegative.value = preset.negative || "";
+    el.modalSetDefault.checked = preset.name === state.defaultPreset;
+    el.modal.hidden = false;
+  }
+
+  function closeModal() {
+    el.modal.hidden = true;
+  }
+
+  async function saveModalPreset() {
+    const name = el.modalName.value.trim();
+    const desc = el.modalDesc.value.trim();
+    const artist = el.modalArtist.value.trim();
+    const positive = el.modalPositive.value.trim();
+    const negative = el.modalNegative.value.trim();
+    const isSetDefault = el.modalSetDefault.checked;
+
+    if (!name) {
+      showToast("预设名称不能为空", "error");
+      el.modalName.focus();
+      return;
+    }
+    if (name.includes(" ")) {
+      showToast("预设名称不能包含空格", "error");
+      el.modalName.focus();
+      return;
+    }
+    if (!state.editingName && state.presets.some((p) => p.name === name)) {
+      showToast(`已存在名为「${name}」的预设，请使用其它名称`, "error");
+      el.modalName.focus();
+      return;
+    }
+    if (!artist && !positive && !negative) {
+      showToast("画师串、正向词、负向词三者至少需填写一项", "error");
+      return;
+    }
+
+    const action = state.editingName ? "update" : "add";
+    try {
+      await bridge.apiPost("presets", {
+        action,
+        data: { name, desc, artist, positive, negative },
+      });
+
+      if (isSetDefault && state.defaultPreset !== name) {
+        await bridge.apiPost("preset/default", { name });
+        state.defaultPreset = name;
+      } else if (!isSetDefault && state.defaultPreset === name) {
+        await bridge.apiPost("preset/default", { name: "" });
+        state.defaultPreset = "";
+      }
+
+      showToast(`预设「${name}」保存成功！`);
+      closeModal();
+      await loadConfig();
+    } catch (err) {
+      showToast(`保存预设失败: ${err.message || err}`, "error");
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 事件绑定
+  // -------------------------------------------------------------------------
+
+  el.reloadBtn.addEventListener("click", loadConfig);
+
+  el.clearDefaultBtn.addEventListener("click", () => setDefaultPreset(""));
+
+  el.btnCreatePreset.addEventListener("click", () => openModalForCreate());
+
+  el.modalCloseBtn.addEventListener("click", closeModal);
+  el.modalCancelBtn.addEventListener("click", closeModal);
+  el.modalSaveBtn.addEventListener("click", saveModalPreset);
+
+  // 点击遮罩外部关闭
+  el.modal.addEventListener("click", (e) => {
+    if (e.target === el.modal) closeModal();
+  });
+
+  // 快捷标签芯片点击追加
+  document.getElementById("artist-quick-chips").addEventListener("click", (e) => {
+    if (e.target.dataset.tag) appendTagToTextarea(el.modalArtist, e.target.dataset.tag);
+  });
+  document.getElementById("pos-quick-chips").addEventListener("click", (e) => {
+    if (e.target.dataset.tag) appendTagToTextarea(el.modalPositive, e.target.dataset.tag);
+  });
+  document.getElementById("neg-quick-chips").addEventListener("click", (e) => {
+    if (e.target.dataset.tag) appendTagToTextarea(el.modalNegative, e.target.dataset.tag);
+  });
+
+  // 搜索和分类过滤
+  el.presetSearch.addEventListener("input", (e) => {
+    state.search = e.target.value;
+    renderPresetList();
+  });
+
+  el.filterChips.forEach((chip) => {
+    chip.addEventListener("click", () => {
+      el.filterChips.forEach((c) => c.classList.remove("active"));
+      chip.classList.add("active");
+      state.filter = chip.dataset.filter;
+      renderPresetList();
+    });
+  });
+
+  // 预设卡片列表事件代理
+  el.presetList.addEventListener("click", (e) => {
+    const target = e.target;
+    const name = target.dataset.name;
+    if (!name) return;
+
+    if (target.classList.contains("btn-set-def")) {
+      setDefaultPreset(name);
+    } else if (target.classList.contains("btn-clear-def")) {
+      setDefaultPreset("");
+    } else if (target.classList.contains("btn-del-preset")) {
+      deletePreset(name);
+    } else if (target.classList.contains("btn-edit-preset")) {
+      const preset = state.presets.find((p) => p.name === name);
+      if (preset) openModalForEdit(preset);
+    } else if (target.classList.contains("btn-copy-preset")) {
+      const preset = state.presets.find((p) => p.name === name);
+      if (preset) openModalForCreate(preset);
+    }
+  });
+
+  // 预览更新
+  el.previewPrompt.addEventListener("input", updatePreview);
+  el.previewPresetSelect.addEventListener("change", updatePreview);
+
+  // 初始化
+  loadConfig();
+})();

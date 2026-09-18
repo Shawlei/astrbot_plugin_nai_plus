@@ -1,0 +1,8 @@
+{
+  "pages": {
+    "nai-config": {
+      "title": "NovelAI 预设管理",
+      "description": "画风预设、质量词/画师串、正向词、负向词可视化编辑与默认预设配置"
+    }
+  }
+}

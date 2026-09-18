@@ -1,0 +1,8 @@
+{
+  "pages": {
+    "nai-config": {
+      "title": "NovelAI Presets",
+      "description": "Visual editor for artist styles, positive/negative tags and default preset settings"
+    }
+  }
+}

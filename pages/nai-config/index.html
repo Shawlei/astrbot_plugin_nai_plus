@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NovelAI 预设管理</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div class="container">
+    <!-- 顶栏 -->
+    <header class="header">
+      <div>
+        <h1 id="page-title">NovelAI 预设管理</h1>
+        <p class="subtitle" id="page-desc">专门编辑画风预设与设置默认预设：质量词/画师串、正向词、负向词三段式配置，改动即时生效</p>
+      </div>
+      <div class="header-meta">
+        <span class="chip" id="status-chip">连接中…</span>
+        <button class="btn btn-secondary btn-sm" id="reload-btn" title="重新从插件读取当前配置">刷新</button>
+      </div>
+    </header>
+
+    <!-- 全局错误横幅 -->
+    <div class="banner banner-error" id="error-banner" hidden></div>
+
+    <!-- 当前默认预设横幅 -->
+    <section class="banner banner-default-preset" id="default-preset-banner">
+      <div class="default-preset-content">
+        <span class="default-preset-icon">★</span>
+        <div>
+          <span class="default-preset-label">当前默认预设：</span>
+          <strong class="default-preset-val" id="current-default-name">未设置</strong>
+          <span class="default-preset-tip" id="current-default-tip">（生图未指定 -p 时使用常规默认配置）</span>
+        </div>
+      </div>
+      <button class="btn btn-secondary btn-sm" id="clear-default-btn" style="display: none;">取消默认</button>
+    </section>
+
+    <!-- 预设管理主要区域 -->
+    <section class="card">
+      <div class="card-header">
+        <div>
+          <h2>画风预设列表</h2>
+          <p class="hint">
+            每个预设均包含三段独立内容：<strong>质量词/画师串</strong>（作为独立 artist 参数发送）、<strong>附带正向词</strong>（追加在用户提示词后）、<strong>附带负向词</strong>（追加在负面词后）。
+          </p>
+        </div>
+        <div class="card-actions">
+          <button class="btn btn-primary" id="btn-create-preset">+ 新建预设</button>
+        </div>
+      </div>
+
+      <!-- 搜索与筛选工具条 -->
+      <div class="toolbar">
+        <div class="search-box">
+          <input type="text" id="preset-search" placeholder="搜索预设名称、描述或标签…" />
+        </div>
+        <div class="filter-chips">
+          <button class="filter-chip active" data-filter="all">全部</button>
+          <button class="filter-chip" data-filter="builtin">官方内置</button>
+          <button class="filter-chip" data-filter="custom">自定义</button>
+        </div>
+      </div>
+
+      <!-- 预设卡片列表网格 -->
+      <div class="preset-grid" id="preset-list">
+        <div class="loading-placeholder">正在加载预设列表…</div>
+      </div>
+    </section>
+
+    <!-- 实时拼接预览卡片 -->
+    <section class="card">
+      <div class="card-header">
+        <div>
+          <h2>拼接效果实时预览</h2>
+          <p class="hint">输入测试提示词并选择预设，实时预览最终发送给 NovelAI 的各项参数结构。</p>
+        </div>
+      </div>
+
+      <div class="preview-controls">
+        <div class="form-group" style="flex: 2;">
+          <label for="preview-prompt">测试提示词：</label>
+          <input type="text" id="preview-prompt" value="1girl, white hair, blue eyes, smiling" placeholder="输入测试用提示词…" />
+        </div>
+        <div class="form-group" style="flex: 1;">
+          <label for="preview-preset-select">选择预览预设：</label>
+          <select id="preview-preset-select">
+            <option value="">加载中…</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="preview-output-grid">
+        <div class="preview-box">
+          <div class="preview-box-title">
+            <span>🎨 画师串参数 (artist)</span>
+            <span class="badge badge-info">独立发送</span>
+          </div>
+          <div class="preview-box-content mono" id="preview-artist-val">（空）</div>
+        </div>
+
+        <div class="preview-box">
+          <div class="preview-box-title">
+            <span>📝 用户提示词 (tag)</span>
+            <span class="badge badge-success">提示词 + 预设正向词</span>
+          </div>
+          <div class="preview-box-content mono" id="preview-tag-val">（空）</div>
+        </div>
+
+        <div class="preview-box">
+          <div class="preview-box-title">
+            <span>🚫 负向提示词 (negative)</span>
+            <span class="badge badge-warning">默认负向 + 预设负向词</span>
+          </div>
+          <div class="preview-box-content mono" id="preview-neg-val">（空）</div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- 预设编辑/新建弹窗 -->
+  <div class="modal-overlay" id="preset-modal" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="modal-title">新建预设</h3>
+        <button class="modal-close" id="modal-close-btn">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="modal-preset-name">预设名称 <span class="required">*</span></label>
+          <input type="text" id="modal-preset-name" placeholder="例如：水彩风景风（不能含空格）" />
+          <p class="field-hint">用于 `/nai -p 预设名` 触发，不能与已有内置预设重名，不能含空格。</p>
+        </div>
+
+        <div class="form-group">
+          <label for="modal-preset-desc">预设说明</label>
+          <input type="text" id="modal-preset-desc" placeholder="简要说明风格特点或主要适用场景…" />
+        </div>
+
+        <div class="form-group">
+          <div class="label-with-actions">
+            <label for="modal-preset-artist">质量词 / 画师串 (artist)</label>
+            <span class="field-tag">作为独立 artist 参数发送</span>
+          </div>
+          <textarea id="modal-preset-artist" rows="3" placeholder="例如：artist collaboration, 1.25::artist:dishwasher1910 ::, best quality, masterpiece"></textarea>
+          <div class="quick-chips" id="artist-quick-chips">
+            <span class="quick-chip-label">快捷添加:</span>
+            <button type="button" class="chip-btn" data-tag="best quality">best quality</button>
+            <button type="button" class="chip-btn" data-tag="amazing quality">amazing quality</button>
+            <button type="button" class="chip-btn" data-tag="very aesthetic">very aesthetic</button>
+            <button type="button" class="chip-btn" data-tag="masterpiece">masterpiece</button>
+            <button type="button" class="chip-btn" data-tag="absurdres">absurdres</button>
+            <button type="button" class="chip-btn" data-tag="year 2025">year 2025</button>
+            <button type="button" class="chip-btn" data-tag="no text">no text</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <div class="label-with-actions">
+            <label for="modal-preset-positive">附带正向词 (positive)</label>
+            <span class="field-tag">追加到用户提示词后</span>
+          </div>
+          <textarea id="modal-preset-positive" rows="2" placeholder="每次套用该预设时，自动拼在用户提示词末尾的固定正向词，例如：solo, soft lighting, detailed background"></textarea>
+          <div class="quick-chips" id="pos-quick-chips">
+            <span class="quick-chip-label">快捷添加:</span>
+            <button type="button" class="chip-btn" data-tag="solo">solo</button>
+            <button type="button" class="chip-btn" data-tag="looking at viewer">looking at viewer</button>
+            <button type="button" class="chip-btn" data-tag="full body">full body</button>
+            <button type="button" class="chip-btn" data-tag="soft lighting">soft lighting</button>
+            <button type="button" class="chip-btn" data-tag="cinematic lighting">cinematic lighting</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <div class="label-with-actions">
+            <label for="modal-preset-negative">附带负向词 (negative)</label>
+            <span class="field-tag">追加到全局负面词后</span>
+          </div>
+          <textarea id="modal-preset-negative" rows="2" placeholder="每次套用该预设时，专属的额外负面约束词，例如：bad anatomy, lowres, text"></textarea>
+          <div class="quick-chips" id="neg-quick-chips">
+            <span class="quick-chip-label">快捷添加:</span>
+            <button type="button" class="chip-btn" data-tag="worst quality">worst quality</button>
+            <button type="button" class="chip-btn" data-tag="lowres">lowres</button>
+            <button type="button" class="chip-btn" data-tag="bad anatomy">bad anatomy</button>
+            <button type="button" class="chip-btn" data-tag="bad hands">bad hands</button>
+            <button type="button" class="chip-btn" data-tag="blurry">blurry</button>
+            <button type="button" class="chip-btn" data-tag="text">text</button>
+          </div>
+        </div>
+
+        <div class="form-check">
+          <label>
+            <input type="checkbox" id="modal-set-default" />
+            <span>保存后设为默认预设（下次普通生图自动套用）</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="modal-cancel-btn">取消</button>
+        <button class="btn btn-primary" id="modal-save-btn">保存预设</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast 提示容器 -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
