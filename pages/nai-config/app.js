@@ -127,7 +127,7 @@
       state.presets = data.presets || [];
       state.defaultPreset = data.default_preset || "";
 
-      el.statusChip.textContent = `已连接 (v${data.version || "0.0.1"})`;
+      el.statusChip.textContent = data.version ? `已连接 (v${data.version})` : "已连接";
       el.statusChip.className = "chip chip-connected";
       el.errorBanner.hidden = true;
 

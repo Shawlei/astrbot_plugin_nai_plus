@@ -141,7 +141,7 @@ git clone https://github.com/Shawlei/astrbot_plugin_nai_plus.git
 |--------|------|--------|
 | `translate_enabled` | 是否启用中文提示词直译 | `false` |
 | `translate_provider_id` | 直译使用的对话模型 ID（留空则直译不生效） | 空 |
-| `translate_system_prompt` | 直译系统提示词（留空使用内置默认值，强调作品名/角色名的 Danbooru 消歧标签） | 内置默认 |
+| `translate_system_prompt` | 直译系统提示词（**中文编写、便于直接修改**，留空使用内置默认值，强调作品名/角色名的 Danbooru 消歧标签） | 内置默认 |
 
 ### 4. 余额查询
 

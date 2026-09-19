@@ -5,7 +5,7 @@ desc: >
   支持 NovelAI V5 双模型（V5 Full / V5 Curated）与指令快速切换。
   内置独立的 WebUI 预设管理面板（质量词/画师串、正向词、负向词三段式可视化编辑与默认预设配置）。
   支持中文提示词直译：提示词含中文时自动用独立对话模型直译为英文 Danbooru 标签（纯英文不触发、失败回退原文并说明原因）。
-version: 0.3.0
+version: 0.3.1
 author: Shawlei
 astrbot_version: ">=4.26.0,<5"
 repo: https://github.com/Shawlei/astrbot_plugin_nai_plus
