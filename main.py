@@ -39,6 +39,13 @@ from .core.preset_manager import (
 
 PLUGIN_NAME = "astrbot_plugin_nai_plus"
 
+# 版本号回退常量（正常情况下从 metadata.yaml 读取，见 _read_plugin_version）
+_PLUGIN_VERSION_FALLBACK = "0.2.2"
+
+# 匹配「唤醒前缀 + nai 指令名」的头部，用于从原始消息还原完整参数、以及展示真实前缀。
+# prefix 允许最多 3 个非字母数字且非空白字符（如 '#'、'/'、'！' 等）。
+_CMD_HEAD_RE = re.compile(r"^(?P<prefix>[^\w\s]{0,3})nai\b\s*", re.IGNORECASE)
+
 # 解析用户输入中的尺寸前缀、-m/--model、-p/--preset、--artist、--negative、--seed 与 --no-preset 参数
 _SIZE_PATTERN = re.compile(
     r'^(2K竖图|2K横图|2K方图|4K竖图|4K横图|4K方图|竖图|横图|方图)\s+',
@@ -50,6 +57,74 @@ _SEED_PATTERN = re.compile(r'--seed\s+(\d+)', re.IGNORECASE)
 _ARTIST_PATTERN = re.compile(r'--artist\s+(.+?)(?=\s+(?:--negative|-p|--preset|-m|--model|--seed|--no-preset)\s+|$)', re.DOTALL)
 _NEGATIVE_PATTERN = re.compile(r'--negative\s+(.+?)(?=\s+(?:--artist|-p|--preset|-m|--model|--seed|--no-preset)\s+|$)', re.DOTALL)
 _NO_PRESET_PATTERN = re.compile(r'--no-preset\b', re.IGNORECASE)
+
+
+def _read_plugin_version() -> str:
+    """从 metadata.yaml 读取插件版本号，读取失败时回退到常量。
+
+    为什么：用户每次排查问题都要靠「猜版本」，把版本号读出来存进内存，
+    便于日志与 /nai version 指令一眼定位。读取逻辑与 WebUI 面板保持一致。
+    """
+    meta_path = Path(__file__).parent / "metadata.yaml"
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r"\s*version:\s*['\"]?([^'\"\s]+)", line)
+                if m:
+                    return m.group(1)
+    except Exception:
+        pass
+    return _PLUGIN_VERSION_FALLBACK
+
+
+def _recover_command_text(event: AstrMessageEvent) -> str | None:
+    """从原始消息文本还原「指令名之后」的完整参数（兜底）。
+
+    为什么：AstrBot 的 CommandFilter 在参数带默认值时会把它当普通 str，
+    只把第一个词传进来（详见 nai_cmd 的说明）。这里直接读原始消息文本，
+    把 `#nai` / `/nai` 之后的全部内容还原出来，即使框架行为再变也不会丢参数。
+    """
+    try:
+        raw = event.get_message_str()
+    except Exception:
+        raw = getattr(event, "message_str", "") or ""
+    if not raw:
+        return None
+    raw = re.sub(r"\s+", " ", str(raw)).strip()
+    m = _CMD_HEAD_RE.match(raw)
+    if not m:
+        return None
+    return raw[m.end():].strip()
+
+
+def _cmd_head(event: AstrMessageEvent) -> str:
+    """返回用户实际使用的「唤醒前缀 + 指令名」，如 '#nai'；取不到时回退 '/nai'。
+
+    仅用于展示文案（帮助/引导），不能用于下发给 NovelAI 的提示词。
+    """
+    try:
+        raw = event.get_message_str()
+    except Exception:
+        raw = getattr(event, "message_str", "") or ""
+    if raw:
+        m = _CMD_HEAD_RE.match(str(raw).strip())
+        if m:
+            return f"{m.group('prefix')}nai"
+    return "/nai"
+
+
+def _model_display_name(model: str) -> str:
+    """把模型标识转成人类可读名称。
+
+    注意：不能用 `"5-full" in model` 判断，因为 "nai-diffusion-4-5-full" 也包含子串
+    "5-full"，会把 V4.5 误判为 V5。这里统一走 resolve_model_alias 精确匹配。
+    """
+    resolved = resolve_model_alias(model) or model
+    if resolved == MODEL_V5_FULL:
+        return "V5 Full (nai-diffusion-5-full)"
+    if resolved == MODEL_V5_CURATED:
+        return "V5 Curated (nai-diffusion-5-curated)"
+    return model
 
 
 def _clean_param_val(val: str | None) -> str | None:
@@ -138,6 +213,8 @@ class Nai2ApiPlugin(Star):
         super().__init__(context)
         self.config = config
         self.data_dir = StarTools.get_data_dir(PLUGIN_NAME)
+        # 版本号只在启动时读取一次，供日志、WebUI 与 /nai version 指令复用
+        self._plugin_version = _read_plugin_version()
 
         api_url = str(config.get("api_url", "https://nai.sta1n.cn")).strip()
         token = str(config.get("token", "")).strip()
@@ -175,6 +252,8 @@ class Nai2ApiPlugin(Star):
 
         self._fix_llm_tool_schemas()
         self._register_webui_apis()
+        # 启动日志带版本号：用户排查问题时不用再「猜版本」
+        logger.info("[Nai2API] Nai2API 生图插件 (Plus) 已加载，版本 v%s", self._plugin_version)
 
     def _fix_llm_tool_schemas(self):
         """修复 LLM 工具的 JSON Schema，添加 required 字段以兼容 Gemini 等模型。"""
@@ -236,16 +315,8 @@ class Nai2ApiPlugin(Star):
             return
 
         def _plugin_version() -> str:
-            meta_path = Path(__file__).parent / "metadata.yaml"
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        m = re.match(r"\s*version:\s*['\"]?([^'\"\s]+)", line)
-                        if m:
-                            return m.group(1)
-            except Exception:
-                pass
-            return "0.1.0"
+            # 复用启动时读取的版本号（见 _read_plugin_version），避免重复读文件
+            return self._plugin_version
 
         # ---- API Handlers --------------------------------------------------
 
@@ -457,10 +528,34 @@ class Nai2ApiPlugin(Star):
     # /nai 指令分发
     # -----------------------------------------------------------------------
 
+    # ⚠️ v0.2.2 重要踩坑记录：`args: GreedyStr` 绝对不能写成 `args: GreedyStr = ""`！
+    #   AstrBot 的 `astrbot/core/star/filter/command.py::CommandFilter.init_handler_md()` 中，
+    #   参数「带默认值」时写入 handler_params 的是「默认值本身」而非注解类型：
+    #       if v.default == inspect.Parameter.empty:
+    #           self.handler_params[k] = v.annotation   # 无默认值 -> 存 GreedyStr 类型
+    #       else:
+    #           self.handler_params[k] = v.default      # 有默认值 -> 存 '' 这个普通字符串
+    #   随后 `validate_and_convert_params()` 用 `is_greedy = param_type_or_default_val is GreedyStr`
+    #   判断：拿到的是 ''（普通 str）→ is_greedy=False → 走 isinstance(..., str) 分支只取第一个 token。
+    #   后果：`#nai -m 5 1girl` 的 args 只剩 '-m'，提示词变成 '-m'、模型退回默认值。
+    #   用户历史上所有「-p / -m 命令没用、风格不生效」的投诉均源于此，故此处刻意不写默认值。
+    #   空参场景安全：AstrBot 在 message_str == 'nai' 时传空串，isinstance("", str) 为真，
+    #   下面的 `text = args.strip()` 照常工作。
     @filter.command("nai")
-    async def nai_cmd(self, event: AstrMessageEvent, args: GreedyStr = ""):
+    async def nai_cmd(self, event: AstrMessageEvent, args: GreedyStr):
         """/nai 指令入口"""
         text = args.strip() if isinstance(args, str) else ""
+
+        # v0.2.2 第二道保险：若框架仍把 GreedyStr 当普通 str 只传了第一个词，
+        # 就从原始消息还原完整参数（谁更长用谁）。正常情况下两者一致 → 无副作用；
+        # 异常时留 warning 日志，禁止静默。
+        recovered = _recover_command_text(event)
+        if recovered is not None and len(recovered) > len(text):
+            logger.warning(
+                "[Nai2API] 指令参数疑似被框架截断（收到 %r），已从原始消息还原为 %r",
+                text, recovered,
+            )
+            text = recovered
 
         # 子指令分发
         if text.startswith("presets") or text.startswith("预设"):
@@ -497,6 +592,8 @@ class Nai2ApiPlugin(Star):
             return await self._handle_del_preset(event, sub)
         elif text.startswith("balance") or text.startswith("余额") or text.startswith("点数") or text.startswith("次数"):
             return await self._handle_balance(event)
+        elif text.startswith("version") or text.startswith("版本"):
+            return await self._handle_version(event)
 
         # 生图指令
         return await self._handle_generate(event, text)
@@ -504,7 +601,9 @@ class Nai2ApiPlugin(Star):
     async def _handle_generate(self, event: AstrMessageEvent, args: str):
         """文生图核心逻辑"""
         if not args:
-            return event.plain_result(
+            # P1-5：帮助文案里的前缀按用户实际唤醒前缀动态适配（如 #nai），
+            # 采用整体 .replace 而非逐个 f-string 插值，避免漏改。
+            help_text = (
                 "Nai2API 生图插件 (Plus)\n"
                 "用法:\n"
                 "  /nai [尺寸] <提示词> [-m 模型] [-p 预设] [--artist 画师串] [--negative 负面] [--seed 种子] [--no-preset]\n\n"
@@ -526,10 +625,19 @@ class Nai2ApiPlugin(Star):
                 "  /nai save <名称> <质量前缀>        保存自定义预设\n"
                 "  /nai update <名称> <新的质量前缀>  修改预设\n"
                 "  /nai del <名称>                   删除自定义预设\n"
-                "  /nai balance                     查询剩余点数"
+                "  /nai balance                     查询剩余点数\n"
+                "  /nai version                     查看插件版本与当前配置"
             )
+            return event.plain_result(help_text.replace("/nai", _cmd_head(event)))
 
         size, prompt, preset_name, artist, negative, seed, no_preset, model = _parse_nai_command(args)
+
+        # 预设名可能是用户手输（如「韩漫风」），尽早解析为真实全名，供引导与生图统一使用
+        if preset_name:
+            resolved_input_preset = self.presets.resolve(preset_name)
+            if resolved_input_preset and resolved_input_preset != preset_name:
+                logger.info("[Nai2API] 预设名 '%s' 已按别名解析为 '%s'", preset_name, resolved_input_preset)
+                preset_name = resolved_input_preset
 
         if not prompt:
             # 智能拦截与引导：用户可能只输入了参数而漏掉了提示词
@@ -537,38 +645,57 @@ class Nai2ApiPlugin(Star):
                 entry = self.presets.get_entry(preset_name)
                 if entry is not None:
                     return event.plain_result(
-                        f"已识别到预设【{preset_name}】。\n"
-                        f"• 若要以此预设单次生图，请在后面加上提示词，例如：\n"
-                        f"  /nai -p {preset_name} 1girl, silver hair\n"
-                        f"• 若要将此预设设为默认（后续生图免写 -p），请发送：\n"
-                        f"  /nai default {preset_name}"
+                        (
+                            f"已识别到预设【{preset_name}】。\n"
+                            f"• 若要以此预设单次生图，请在后面加上提示词，例如：\n"
+                            f"  /nai -p {preset_name} 1girl, silver hair\n"
+                            f"• 若要将此预设设为默认（后续生图免写 -p），请发送：\n"
+                            f"  /nai default {preset_name}"
+                        ).replace("/nai", _cmd_head(event))
                     )
                 else:
-                    return event.plain_result(f"预设 '{preset_name}' 不存在，请发送 /nai presets 查看可用预设")
+                    return event.plain_result(
+                        f"预设 '{preset_name}' 不存在，可用预设：{self._available_preset_names()}"
+                    )
             elif model and not preset_name:
-                model_name = "V5 (nai-diffusion-5-full)" if "5-full" in model else ("V5 Curated" if "curated" in model else model)
+                model_name = _model_display_name(model)
                 return event.plain_result(
-                    f"已识别到模型【{model_name}】。\n"
-                    f"• 若要以此模型生图，请在后面加上提示词，例如：\n"
-                    f"  /nai -m 5 1girl, silver hair\n"
-                    f"• 若要将全局默认模型切换为该模型，请发送：\n"
-                    f"  /nai model 5"
+                    (
+                        f"已识别到模型【{model_name}】。\n"
+                        f"• 若要以此模型生图，请在后面加上提示词，例如：\n"
+                        f"  /nai -m 5 1girl, silver hair\n"
+                        f"• 若要将全局默认模型切换为该模型，请发送：\n"
+                        f"  /nai model 5"
+                    ).replace("/nai", _cmd_head(event))
                 )
             elif preset_name and model:
                 return event.plain_result(
-                    f"已识别到模型与预设，但未提供图片提示词。\n"
-                    f"生图示例：/nai -m 5 -p {preset_name} 1girl, white dress"
+                    (
+                        f"已识别到模型与预设，但未提供图片提示词。\n"
+                        f"生图示例：/nai -m 5 -p {preset_name} 1girl, white dress"
+                    ).replace("/nai", _cmd_head(event))
                 )
-            return event.plain_result("提示词不能为空。请在指令中输入图片描述，例如：/nai 1girl, silver hair")
+            return event.plain_result(
+                f"提示词不能为空。请在指令中输入图片描述，例如：{_cmd_head(event)} 1girl, silver hair"
+            )
 
         # 确定生效预设：--no-preset 强制不使用任何预设；否则优先指令 -p，其次默认预设
         effective_preset = None if no_preset else (preset_name or self._default_preset or None)
+
+        # P1-4：默认预设名也可能是用户手输的别名，统一解析一次（只映射，不新建/覆盖预设）
+        if effective_preset:
+            resolved_effective = self.presets.resolve(effective_preset)
+            if resolved_effective and resolved_effective != effective_preset:
+                logger.info("[Nai2API] 预设名 '%s' 已按别名解析为 '%s'", effective_preset, resolved_effective)
+                effective_preset = resolved_effective
 
         preset_entry = None
         if effective_preset:
             preset_entry = self.presets.get_entry(effective_preset)
             if preset_entry is None and artist is None:
-                return event.plain_result(f"预设 '{effective_preset}' 不存在，使用 /nai presets 查看可用预设")
+                return event.plain_result(
+                    f"预设 '{effective_preset}' 不存在，可用预设：{self._available_preset_names()}"
+                )
 
         preset_artist = preset_entry.get("artist", "") if preset_entry else ""
         preset_pos = preset_entry.get("positive", "") if preset_entry else ""
@@ -608,6 +735,25 @@ class Nai2ApiPlugin(Star):
                 return event.plain_result(info_text)
             return event.plain_result(f"生图失败: {e}")
 
+    def _available_preset_names(self) -> str:
+        """返回顿号分隔的可用预设名，用于报错时直接告知用户（省去再发一条指令）。"""
+        names = list(self.presets.list_all().keys())
+        return "、".join(names) if names else "（暂无预设）"
+
+    async def _handle_version(self, event: AstrMessageEvent):
+        """查询插件版本与当前运行配置（P0-3：方便用户一眼定位版本）。"""
+        model_disp = _model_display_name(self.client.default_model)
+        preset_disp = self._default_preset or "（未设置，使用全局默认画师串）"
+        lines = [
+            "Nai2API 生图插件 (Plus)",
+            f"插件版本: v{self._plugin_version}",
+            f"当前默认模型: {model_disp}",
+            f"当前默认预设: {preset_disp}",
+            "",
+            "提示: 指令前缀以你配置的唤醒前缀为准（如 #nai 或 /nai）。",
+        ]
+        return event.plain_result("\n".join(lines))
+
     async def _handle_default_preset_cmd(self, event: AstrMessageEvent, sub: str):
         """设置或查询默认预设"""
         sub = _clean_param_val(sub) or ""
@@ -621,8 +767,14 @@ class Nai2ApiPlugin(Star):
             self._default_preset = ""
             return event.plain_result("已取消默认预设，恢复常规生图配置。")
 
+        # P1-4：把用户手输的别名（如「韩漫风」）解析为真实全名
+        resolved = self.presets.resolve(sub)
+        if resolved and resolved != sub:
+            logger.info("[Nai2API] 默认预设名 '%s' 已按别名解析为 '%s'", sub, resolved)
+            sub = resolved
+
         if self.presets.get_entry(sub) is None:
-            return event.plain_result(f"预设 '{sub}' 不存在，使用 /nai presets 查看可用预设")
+            return event.plain_result(f"预设 '{sub}' 不存在，可用预设：{self._available_preset_names()}")
 
         await self._save_plugin_config({"default_preset": sub})
         self._default_preset = sub
@@ -632,8 +784,7 @@ class Nai2ApiPlugin(Star):
         """查询或切换默认生图模型"""
         sub = _clean_param_val(sub) or ""
         if not sub:
-            curr_model = self.client.default_model
-            model_disp = "V5 Full (nai-diffusion-5-full)" if "5-full" in curr_model else ("V5 Curated (nai-diffusion-5-curated)" if "curated" in curr_model else curr_model)
+            model_disp = _model_display_name(self.client.default_model)
             lines = [
                 f"当前默认模型: 【{model_disp}】",
                 "",
@@ -646,7 +797,7 @@ class Nai2ApiPlugin(Star):
                 "",
                 "单次临时生图示例: /nai -m 5 1girl, silver hair"
             ]
-            return event.plain_result("\n".join(lines))
+            return event.plain_result("\n".join(lines).replace("/nai", _cmd_head(event)))
 
         resolved = resolve_model_alias(sub)
         if not resolved:
@@ -654,7 +805,7 @@ class Nai2ApiPlugin(Star):
 
         await self._save_plugin_config({"default_model": resolved})
         self.client.default_model = resolved
-        model_disp = "V5 Full (nai-diffusion-5-full)" if "5-full" in resolved else ("V5 Curated (nai-diffusion-5-curated)" if "curated" in resolved else resolved)
+        model_disp = _model_display_name(resolved)
         return event.plain_result(f"已将默认生图模型切换为: 【{model_disp}】！后续生图未加 -m 时将默认使用该模型。")
 
     async def _handle_balance(self, event: AstrMessageEvent):
@@ -690,6 +841,13 @@ class Nai2ApiPlugin(Star):
         all_presets = self.presets.list_all()
 
         if preset_name:
+            # P1-4：兼容用户手输别名（如「韩漫风」→「韩漫小清新风」）
+            preset_name = _clean_param_val(preset_name) or preset_name
+            resolved = self.presets.resolve(preset_name)
+            if resolved and resolved != preset_name:
+                logger.info("[Nai2API] 预设名 '%s' 已按别名解析为 '%s'", preset_name, resolved)
+                preset_name = resolved
+
             if preset_name in all_presets:
                 info = all_presets[preset_name]
                 builtin_tag = " [官方内置]" if self.presets.is_builtin(preset_name) else " [自定义]"
@@ -704,7 +862,7 @@ class Nai2ApiPlugin(Star):
                     f"描述: {desc}\n\n质量前缀 (artist):\n{artist_val}\n\n附带正向词 (positive):\n{pos_val}\n\n附带负向词 (negative):\n{neg_val}"
                 )
             else:
-                return event.plain_result(f"预设 '{preset_name}' 不存在，使用 /nai presets 查看可用预设")
+                return event.plain_result(f"预设 '{preset_name}' 不存在，可用预设：{self._available_preset_names()}")
 
         if not all_presets:
             return event.plain_result("暂无预设")
@@ -726,7 +884,7 @@ class Nai2ApiPlugin(Star):
         lines.append("\n使用: /nai -p <预设名> <提示词>")
         lines.append("设默认: /nai default <预设名>")
         lines.append("更多管理请在 AstrBot 插件页面打开【NovelAI 预设管理】WebUI 面板")
-        return self._forward_result(event, "可用预设列表", "\n".join(lines))
+        return self._forward_result(event, "可用预设列表", "\n".join(lines).replace("/nai", _cmd_head(event)))
 
     async def _handle_save_preset(self, event: AstrMessageEvent, args: str):
         """保存自定义预设"""
@@ -753,6 +911,13 @@ class Nai2ApiPlugin(Star):
         if not name:
             return event.plain_result("用法: /nai del <名称>")
 
+        name = _clean_param_val(name) or name
+        # P1-4：兼容用户手输别名，先解析为真实全名再删除
+        resolved = self.presets.resolve(name)
+        if resolved and resolved != name:
+            logger.info("[Nai2API] 待删除预设名 '%s' 已按别名解析为 '%s'", name, resolved)
+            name = resolved
+
         if self.presets.is_builtin(name):
             return event.plain_result(f"'{name}' 是内置预设，无法删除")
 
@@ -763,7 +928,7 @@ class Nai2ApiPlugin(Star):
             await self._persist_presets_to_config()
             return event.plain_result(f"已删除预设 '{name}'")
         else:
-            return event.plain_result(f"预设 '{name}' 不存在")
+            return event.plain_result(f"预设 '{name}' 不存在，可用预设：{self._available_preset_names()}")
 
     async def _handle_update_preset(self, event: AstrMessageEvent, args: str):
         """修改自定义预设"""
@@ -776,6 +941,13 @@ class Nai2ApiPlugin(Star):
         if not name or not artist:
             return event.plain_result("名称和质量前缀不能为空")
 
+        name = _clean_param_val(name) or name
+        # P1-4：兼容用户手输别名，先解析为真实全名再修改
+        resolved = self.presets.resolve(name)
+        if resolved and resolved != name:
+            logger.info("[Nai2API] 待修改预设名 '%s' 已按别名解析为 '%s'", name, resolved)
+            name = resolved
+
         if self.presets.is_builtin(name):
             return event.plain_result(f"'{name}' 是内置预设，无法修改")
 
@@ -783,7 +955,7 @@ class Nai2ApiPlugin(Star):
             await self._persist_presets_to_config()
             return event.plain_result(f"已修改预设 '{name}': {artist}")
         else:
-            return event.plain_result(f"预设 '{name}' 不存在，使用 /nai save 保存新预设")
+            return event.plain_result(f"预设 '{name}' 不存在，请先用 {_cmd_head(event)} save 保存新预设")
 
     # -----------------------------------------------------------------------
     # LLM 工具调用
@@ -827,6 +999,12 @@ class Nai2ApiPlugin(Star):
 
         # 确定预设
         effective_preset = preset.strip() or self._default_preset or None
+        # P1-4：LLM 传入的预设名也可能是别名（如「韩漫风」），统一解析
+        if effective_preset:
+            resolved_preset = self.presets.resolve(effective_preset)
+            if resolved_preset and resolved_preset != effective_preset:
+                logger.info("[Nai2API] LLM 工具预设名 '%s' 已按别名解析为 '%s'", effective_preset, resolved_preset)
+                effective_preset = resolved_preset
         preset_entry = self.presets.get_entry(effective_preset) if effective_preset else None
 
         preset_artist = preset_entry.get("artist", "") if preset_entry else ""
@@ -929,6 +1107,11 @@ class Nai2ApiPlugin(Star):
         all_presets = self.presets.list_all()
 
         if preset_name and preset_name not in ("all", "全部"):
+            # P1-4：兼容 LLM 传入手输别名（如「韩漫风」）
+            resolved = self.presets.resolve(preset_name)
+            if resolved and resolved != preset_name:
+                logger.info("[Nai2API] LLM 查询预设名 '%s' 已按别名解析为 '%s'", preset_name, resolved)
+                preset_name = resolved
             if preset_name in all_presets:
                 info = all_presets[preset_name]
                 desc = info.get("desc", "")
@@ -938,7 +1121,7 @@ class Nai2ApiPlugin(Star):
                 is_def = " (默认预设)" if preset_name == self._default_preset else ""
                 result_text = f"预设 '{preset_name}'{is_def}\n描述: {desc}\n质量前缀: {artist_val}\n正向词: {pos_val}\n负向词: {neg_val}"
             else:
-                result_text = f"预设 '{preset_name}' 不存在"
+                result_text = f"预设 '{preset_name}' 不存在，可用预设：{self._available_preset_names()}"
             return mcp.types.CallToolResult(
                 content=[mcp.types.TextContent(type="text", text=result_text)]
             )

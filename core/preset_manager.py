@@ -170,6 +170,90 @@ def parse_webui_presets(raw: Any) -> dict[str, dict[str, str]]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# 预设别名表（P1-4：用户习惯输入的名字 → 内置真实全名）
+#
+# 背景：用户常把「韩漫小清新风」简化成「韩漫风」、把「本子动漫风」说成「本子风」，
+# 导致 -p 参数匹配不到真实预设而报错。此表只做「输入 → 真实全名」的映射，
+# 解析不到时返回 None 由上层报错，绝不新建或覆盖任何预设（禁止静默降级）。
+# ---------------------------------------------------------------------------
+
+PRESET_ALIASES: dict[str, str] = {
+    "韩漫风": "韩漫小清新风", "韩漫": "韩漫小清新风", "韩漫小清新": "韩漫小清新风",
+    "小清新": "韩漫小清新风", "小清新风": "韩漫小清新风",
+    "本子风": "本子动漫风", "本子": "本子动漫风", "本子动漫": "本子动漫风",
+    "2.5d": "2.5D唯美风", "2.5d唯美": "2.5D唯美风", "唯美风": "2.5D唯美风",
+    "唯美": "2.5D唯美风", "半写实": "2.5D唯美风",
+    "galgame": "GalGame风", "galgame风": "GalGame风", "gal风": "GalGame风", "gal": "GalGame风",
+    "动漫": "动漫风", "二次元": "动漫风", "动漫插画": "动漫风",
+}
+
+# 需要剥离的外层包裹符号（用户误输入的尖括号 / 书名号 / 引号等）
+_PRESET_WRAPPERS = (("<", ">"), ("《", "》"), ("【", "】"), ('"', '"'), ("'", "'"))
+
+
+def _norm_preset_key(name: Any) -> str:
+    """归一化预设名用于比较：去全部空白 + 转小写 + 剥最外层包裹符号。"""
+    if name is None:
+        return ""
+    key = str(name).strip()
+    for l_bracket, r_bracket in _PRESET_WRAPPERS:
+        if key.startswith(l_bracket) and key.endswith(r_bracket) and len(key) >= 2:
+            key = key[len(l_bracket):-len(r_bracket)].strip()
+    key = re.sub(r"\s+", "", key)
+    return key.lower()
+
+
+def resolve_preset_name(name: Any, available) -> str | None:
+    """把用户输入的预设名解析为真实存在的预设名，解析不出返回 None。
+
+    匹配顺序：
+        1. 精确匹配
+        2. 别名表（PRESET_ALIASES，键也做归一化比较）
+        3. 忽略大小写 / 空白
+        4. 唯一子串匹配（输入是真实名的子串，或真实名是输入的子串，且结果唯一）
+
+    注意：只做「输入 → 真实全名」映射，**绝不新建或覆盖预设**。
+    解析不到就返回 None，让上层显式报错，禁止静默降级。
+    """
+    if name is None:
+        return None
+    raw = str(name).strip()
+    if not raw:
+        return None
+
+    avail_list = [str(a) for a in available]
+    avail_set = set(avail_list)
+
+    # 1. 精确匹配
+    if raw in avail_set:
+        return raw
+
+    norm_input = _norm_preset_key(raw)
+    if not norm_input:
+        return None
+
+    # 2. 别名表（别名键归一化后比较）
+    for alias, target in PRESET_ALIASES.items():
+        if _norm_preset_key(alias) == norm_input and target in avail_set:
+            return target
+
+    # 3. 忽略大小写 / 空白
+    for a in avail_list:
+        if _norm_preset_key(a) == norm_input:
+            return a
+
+    # 4. 唯一子串匹配
+    substr_hits = [
+        a for a in avail_list
+        if norm_input in _norm_preset_key(a) or _norm_preset_key(a) in norm_input
+    ]
+    if len(substr_hits) == 1:
+        return substr_hits[0]
+
+    return None
+
+
 class PresetManager:
     """预设管理器，支持三段式预设（画师串、正向词、负向词）与默认预设管理。"""
 
@@ -258,6 +342,13 @@ class PresetManager:
         result = {k: _normalize_entry(**v) for k, v in BUILTIN_PRESETS.items()}
         result.update(self._custom_presets)
         return result
+
+    def resolve(self, name: str) -> str | None:
+        """把用户输入的预设名解析为真实存在的预设名（含别名），解析不出返回 None。
+
+        便捷封装，供指令与 LLM 工具统一调用；只做映射，不新建/覆盖预设。
+        """
+        return resolve_preset_name(name, self.list_all().keys())
 
     def list_custom(self) -> dict[str, dict[str, str]]:
         return dict(self._custom_presets)

@@ -1,5 +1,53 @@
 # 更新日志
 
+## v0.2.2 (2026-09-18)
+
+> **这是一次「找到真凶」的修复版本。** 用户此前反馈的「`-p` / `-m` 命令没用、风格不生效」，
+> 根源是 AstrBot 框架对指令参数的处理方式，而非用户操作问题。
+
+- **修复致命的指令参数被截断 bug（真凶：GreedyStr 默认值踩坑）**：
+  - **现象（用户真实后台日志为证）**：用户输入 `#nai -m 5 1girl`，日志却显示
+    `提示词: -m, 1girl, ...` 且模型仍是默认的 V4.5 → `5` 和 `1girl` 丢失，只收到第一个词 `-m`。
+  - **根因**：`main.py` 中指令签名写成了 `async def nai_cmd(self, event, args: GreedyStr = "")`。
+    AstrBot 的 `astrbot/core/star/filter/command.py::CommandFilter.init_handler_md()` 里，
+    参数**带默认值**时写入 `handler_params` 的是**默认值本身**（此处为 `''` 普通字符串），
+    而不是注解类型 `GreedyStr`：
+    ```python
+    if v.default == inspect.Parameter.empty:
+        self.handler_params[k] = v.annotation   # 无默认值 -> 存 GreedyStr 类型
+    else:
+        self.handler_params[k] = v.default      # 有默认值 -> 存 '' 这个普通字符串
+    ```
+    随后 `validate_and_convert_params()` 用 `is_greedy = param_type_or_default_val is GreedyStr`
+    判断：拿到的是 `''`（普通 str）→ `is_greedy=False` → 走 `isinstance(..., str)` 分支**只取第一个 token**。
+  - **修复（P0-1）**：去掉 `= ""` 默认值，恢复 `args: GreedyStr`。空参场景仍安全
+    （AstrBot 在 `message_str == 'nai'` 时传空串）。代码中已写明注释与踩坑记录，防止后人再改回去。
+  - **第二道保险（P0-2）**：新增 `_recover_command_text(event)`，直接从**原始消息文本**还原
+    「指令名之后」的完整参数。`nai_cmd` 中采取「谁更长用谁」策略，正常情况两者一致无副作用，
+    异常时打 `warning` 日志（禁止静默）。即使框架行为再变，也不会再丢参数。
+- **新增版本自检指令 `/nai version`（别名 `版本`）（P0-3）**：
+  - 返回插件版本、当前默认模型、当前默认预设，并提示「指令前缀以你配置的唤醒前缀为准」。
+  - 插件启动时读取 `metadata.yaml` 的版本号存入 `self._plugin_version`，并打印启动日志
+    `已加载，版本 vX.X.X`，方便用户一眼定位版本（不用再猜）。
+- **新增预设名别名解析（P1-4）**：
+  - 用户习惯输入「韩漫风」，而内置全名是「韩漫小清新风」；现在会自动映射。
+  - `core/preset_manager.py` 新增 `PRESET_ALIASES` 别名表、`_norm_preset_key()` 与
+    `resolve_preset_name()`，以及 `PresetManager.resolve()` 便捷方法。
+  - 匹配顺序：精确匹配 → 别名表 → 忽略大小写/空格 → 唯一子串匹配；**只做「输入→真实全名」映射，
+    绝不新建或覆盖预设，解析不到返回 None 由上层报错（禁止静默降级）**。
+  - 已接入 `-p` 生图、`/nai default`、`/nai presets <名>`、`/nai update`、`/nai del` 及 LLM 工具；
+    解析成功且与原名不同时打 `info` 日志留痕。
+  - **未**在 `/nai save`（新建预设不该被改名）与 WebUI `api_presets`（精确 id 操作）中启用。
+  - 预设不存在的报错现在**直接列出所有可用预设名**，用户无需再发一条 `/nai presets`。
+- **帮助文案适配真实唤醒前缀（P1-5）**：
+  - 用户把唤醒前缀从 `/` 改成 `#` 后，帮助与引导文案不再写死 `/nai`，而是按实际前缀显示
+    （通过 `_cmd_head(event)` + 整体 `.replace("/nai", ...)` 产出，避免逐个插值漏改）。
+- **完善自动化测试**：
+  - 新增回归守卫：断言 `nai_cmd` 的 `args` 参数**没有默认值**（防止后人手贱写回 `= ""`）。
+  - 新增端到端复现测试：模拟 `args` 被截断为 `-m`，原始消息为 `#nai -m 5 1girl`，
+    断言最终 `client.generate` 收到 `model == "nai-diffusion-5-full"` 且 prompt 不含 `-m`。
+  - 新增预设别名解析、别名报错列出可用预设、`/nai version` 含版本号等测试。
+
 ## v0.2.1 (2026-09-18)
 
 - **增强 `-p` 与 `-m` 参数的容错清洗与标点兼容**：

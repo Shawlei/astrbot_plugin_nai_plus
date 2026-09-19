@@ -585,6 +585,224 @@ class TestStandaloneCommandsAndGuidance(unittest.IsolatedAsyncioTestCase):
             shutil.rmtree(data_dir, ignore_errors=True)
 
 
+class TestGreedyStrRegressionGuard(unittest.TestCase):
+    """回归守卫：防止有人把 nai_cmd 的 args 参数写回默认值。
+
+    AstrBot 的 CommandFilter 在参数带默认值时会把注解类型换成默认值本身，
+    导致 GreedyStr 失效、只传第一个词（历史上 '#nai -m 5 1girl' 只收到 '-m'）。
+    本测试即锁死这一约束，任何人改回 `args: GreedyStr = ""` 都会失败。
+    """
+
+    def test_nai_cmd_args_has_no_default(self):
+        import inspect
+        from astrbot_plugin_nai_plus.main import Nai2ApiPlugin
+
+        sig = inspect.signature(Nai2ApiPlugin.nai_cmd)
+        self.assertIn("args", sig.parameters, "nai_cmd 必须有 args 参数")
+        args_param = sig.parameters["args"]
+        # 不依赖被 mock 掉的 GreedyStr 类型，只断言「没有默认值」这一关键约束
+        self.assertIs(
+            args_param.default,
+            inspect.Parameter.empty,
+            "nai_cmd 的 args 不能有默认值！带默认值会让 AstrBot 把 GreedyStr 当普通 str，"
+            "只传第一个词（历史上 '#nai -m 5 1girl' 只收到 '-m'）。",
+        )
+        # 注解也不应为空（必须保留类型注解）
+        self.assertIsNot(args_param.annotation, inspect.Parameter.empty)
+
+
+class TestTruncationRecoveryEndToEnd(unittest.IsolatedAsyncioTestCase):
+    """端到端复现：模拟框架把 args 截断为 '-m'，兜底应从原始消息还原完整参数。"""
+
+    def setUp(self):
+        from astrbot_plugin_nai_plus.main import Nai2ApiPlugin
+
+        mock_context = MagicMock()
+        mock_context.register_web_api = mock_register_web_api
+        self.data_dir = PLUGIN_ROOT / "tests" / "tmp_data_e2e"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        mock_astrbot.api.star.StarTools.get_data_dir.return_value = self.data_dir
+
+        self.plugin = Nai2ApiPlugin(
+            mock_context,
+            {"token": "dummy", "default_preset": "", "default_model": "nai-diffusion-4-5-full"},
+        )
+        # 隔离生图链路，避免真实 IO / 网络
+        self.plugin.client.generate = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+        self.plugin.imgr.save_image = AsyncMock(return_value=Path("fake.png"))
+        self.plugin._send_image_with_info = AsyncMock()
+
+    def tearDown(self):
+        import shutil
+        if self.data_dir.exists():
+            shutil.rmtree(self.data_dir, ignore_errors=True)
+
+    async def test_truncated_args_recovered_from_raw_message(self):
+        event = MagicMock()
+        event.message_str = "#nai -m 5 1girl"
+        event.get_message_str = lambda: "#nai -m 5 1girl"
+
+        # 模拟框架 bug：只把第一个词 '-m' 传进来
+        await self.plugin.nai_cmd(event, "-m")
+
+        self.assertGreaterEqual(self.plugin.client.generate.await_count, 1,
+                                "应从原始消息还原完整参数并触发生图")
+        call = self.plugin.client.generate.await_args
+        prompt_arg = call.args[0]
+        self.assertIn("1girl", prompt_arg)
+        self.assertNotIn("-m", prompt_arg)
+        self.assertEqual(call.kwargs.get("model"), "nai-diffusion-5-full")
+
+    async def test_normal_args_not_overridden_by_recovery(self):
+        event = MagicMock()
+        event.message_str = "#nai -m 5 1girl"
+        event.get_message_str = lambda: "#nai -m 5 1girl"
+
+        # args 完整时，兜底不应产生副作用
+        await self.plugin.nai_cmd(event, "-m 5 1girl")
+        call = self.plugin.client.generate.await_args
+        self.assertEqual(call.kwargs.get("model"), "nai-diffusion-5-full")
+        self.assertIn("1girl", call.args[0])
+        self.assertNotIn("-m", call.args[0])
+
+
+class TestPresetAliasResolution(unittest.TestCase):
+    """P1-4：预设名别名解析（输入 → 真实全名）。"""
+
+    def test_resolve_preset_name_builtin_aliases(self):
+        from astrbot_plugin_nai_plus.core.preset_manager import (
+            resolve_preset_name,
+            BUILTIN_PRESETS,
+        )
+        names = list(BUILTIN_PRESETS.keys())
+
+        self.assertEqual(resolve_preset_name("韩漫风", names), "韩漫小清新风")
+        self.assertEqual(resolve_preset_name("韩漫", names), "韩漫小清新风")
+        self.assertEqual(resolve_preset_name("小清新", names), "韩漫小清新风")
+        self.assertEqual(resolve_preset_name("小清新风", names), "韩漫小清新风")
+        self.assertEqual(resolve_preset_name("本子风", names), "本子动漫风")
+        self.assertEqual(resolve_preset_name("gal", names), "GalGame风")
+        self.assertEqual(resolve_preset_name("galgame", names), "GalGame风")
+        self.assertEqual(resolve_preset_name("唯美风", names), "2.5D唯美风")
+        self.assertEqual(resolve_preset_name("半写实", names), "2.5D唯美风")
+        self.assertEqual(resolve_preset_name("动漫", names), "动漫风")
+        # 精确名原样返回
+        self.assertEqual(resolve_preset_name("动漫风", names), "动漫风")
+        # 不存在的名字返回 None（禁止静默降级）
+        self.assertIsNone(resolve_preset_name("完全不存在的风格名", names))
+        self.assertIsNone(resolve_preset_name("", names))
+        self.assertIsNone(resolve_preset_name(None, names))
+
+    def test_resolve_does_not_create_or_override(self):
+        """别名解析只做映射，不改动预设集合本身。"""
+        from astrbot_plugin_nai_plus.core.preset_manager import PresetManager
+        tmp = PLUGIN_ROOT / "tests" / "tmp_alias"
+        tmp.mkdir(parents=True, exist_ok=True)
+        try:
+            pm = PresetManager(tmp)
+            before = set(pm.list_all().keys())
+            self.assertEqual(pm.resolve("韩漫风"), "韩漫小清新风")
+            self.assertIsNone(pm.resolve("根本没有这个预设"))
+            after = set(pm.list_all().keys())
+            self.assertEqual(before, after)
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestPresetAliasInCommand(unittest.IsolatedAsyncioTestCase):
+    """P1-4：指令层接入别名解析 + 报错列出可用预设。"""
+
+    def setUp(self):
+        from astrbot_plugin_nai_plus.main import Nai2ApiPlugin
+
+        mock_context = MagicMock()
+        mock_context.register_web_api = mock_register_web_api
+        self.data_dir = PLUGIN_ROOT / "tests" / "tmp_data_alias"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        mock_astrbot.api.star.StarTools.get_data_dir.return_value = self.data_dir
+
+        self.plugin = Nai2ApiPlugin(mock_context, {"token": "dummy", "default_preset": ""})
+        self.plugin.client.generate = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n")
+        self.plugin.imgr.save_image = AsyncMock(return_value=Path("fake.png"))
+        self.plugin._send_image_with_info = AsyncMock()
+
+    def tearDown(self):
+        import shutil
+        if self.data_dir.exists():
+            shutil.rmtree(self.data_dir, ignore_errors=True)
+
+    async def test_alias_preset_used_in_generate(self):
+        event = MagicMock()
+        event.message_str = "#nai -p 韩漫风 1girl"
+        event.get_message_str = lambda: "#nai -p 韩漫风 1girl"
+
+        await self.plugin._handle_generate(event, "-p 韩漫风 1girl")
+        self.assertEqual(self.plugin.client.generate.await_count, 1)
+        call = self.plugin.client.generate.await_args
+        self.assertEqual(call.kwargs.get("artist"), BUILTIN_PRESETS["韩漫小清新风"]["artist"])
+
+    async def test_unknown_preset_error_lists_available(self):
+        event = MagicMock()
+        event.plain_result = lambda text: text
+        event.message_str = "#nai -p 完全不存在的风格名 1girl"
+        event.get_message_str = lambda: "#nai -p 完全不存在的风格名 1girl"
+
+        res = await self.plugin._handle_generate(event, "-p 完全不存在的风格名 1girl")
+        self.assertIsInstance(res, str)
+        self.assertIn("不存在", res)
+        # 报错里应直接列出可用预设名
+        self.assertIn("动漫风", res)
+        self.assertIn("韩漫小清新风", res)
+
+
+class TestVersionCommand(unittest.IsolatedAsyncioTestCase):
+    """P0-3：/nai version 版本自检。"""
+
+    def setUp(self):
+        from astrbot_plugin_nai_plus.main import Nai2ApiPlugin
+
+        mock_context = MagicMock()
+        mock_context.register_web_api = mock_register_web_api
+        self.data_dir = PLUGIN_ROOT / "tests" / "tmp_data_ver"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        mock_astrbot.api.star.StarTools.get_data_dir.return_value = self.data_dir
+
+        self.plugin = Nai2ApiPlugin(mock_context, {"token": "dummy"})
+
+    def tearDown(self):
+        import shutil
+        if self.data_dir.exists():
+            shutil.rmtree(self.data_dir, ignore_errors=True)
+
+    async def test_handle_version_contains_version(self):
+        import re as _re
+
+        event = MagicMock()
+        event.plain_result = lambda text: text
+
+        res = await self.plugin._handle_version(event)
+        self.assertIn("插件版本", res)
+        self.assertIn("当前默认模型", res)
+        self.assertIn("当前默认预设", res)
+        self.assertIn(f"v{self.plugin._plugin_version}", res)
+
+        # 版本号应与 metadata.yaml 一致
+        meta = (PLUGIN_ROOT / "metadata.yaml").read_text(encoding="utf-8")
+        m = _re.search(r"version:\s*([^\s]+)", meta)
+        self.assertIsNotNone(m)
+        self.assertEqual(self.plugin._plugin_version, m.group(1))
+
+    async def test_version_dispatched_from_nai_cmd(self):
+        event = MagicMock()
+        event.plain_result = lambda text: text
+
+        res_en = await self.plugin.nai_cmd(event, "version")
+        self.assertIn(f"v{self.plugin._plugin_version}", res_en)
+
+        res_cn = await self.plugin.nai_cmd(event, "版本")
+        self.assertIn(f"v{self.plugin._plugin_version}", res_cn)
+
 
 class TestModelResolutionAndV5Detection(unittest.TestCase):
     """Test model alias resolution and V5 model detection."""
