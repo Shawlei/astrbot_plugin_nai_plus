@@ -1157,6 +1157,63 @@ class TestPromptTranslation(unittest.IsolatedAsyncioTestCase):
         self.assertIn("translate_enabled", schema)
         self.assertIn("translate_provider_id", schema)
 
+    async def test_clean_llm_output_keeps_all_multiline_tags(self):
+        """B1 回归：多行标签必须全部保留，绝不静默丢弃后面几行。"""
+        from astrbot_plugin_nai_plus.core.translate_client import _clean_llm_output
+
+        out = _clean_llm_output("1girl, silver hair\nstanding, cherry_blossom")
+        self.assertIn("silver hair", out)
+        self.assertIn("cherry_blossom", out)
+        self.assertEqual(out, "1girl, silver hair, standing, cherry_blossom")
+
+    async def test_clean_llm_output_drops_explanatory_line(self):
+        """末尾解释性句子（以句号结尾）应被剔除。"""
+        from astrbot_plugin_nai_plus.core.translate_client import _clean_llm_output
+
+        out = _clean_llm_output("1girl, silver hair\n注意：我只翻译了标签。")
+        self.assertEqual(out, "1girl, silver hair")
+
+    async def test_clean_llm_output_keeps_weight_lines_ending_with_double_colon(self):
+        """B1 回归守卫：以 `::` 结尾的权重行绝不能被当解释行剔除。"""
+        from astrbot_plugin_nai_plus.core.translate_client import _clean_llm_output
+
+        out = _clean_llm_output("1.3::silver hair::\n1girl")
+        self.assertIn("1.3::silver hair::", out)
+        self.assertIn("1girl", out)
+
+        out2 = _clean_llm_output("\\n20::best quality::\n1girl")
+        self.assertIn("\\n20::best quality::", out2)
+        self.assertIn("1girl", out2)
+
+    async def test_clean_llm_output_single_line_unchanged(self):
+        """单行行为保持不变（回归）。"""
+        from astrbot_plugin_nai_plus.core.translate_client import _clean_llm_output
+
+        self.assertEqual(_clean_llm_output("1girl, silver hair, smile"), "1girl, silver hair, smile")
+
+    async def test_default_prompt_content_guards(self):
+        """提示词内容守卫：P0-1/P0-2 与规则 12 的关键表述必须在，旧措辞必须不在。"""
+        from astrbot_plugin_nai_plus.core.translate_client import DEFAULT_TRANSLATE_SYSTEM_PROMPT as P
+
+        # P0-1：必须给出「不带括号」的角色示例 hatsune_miku，并明确「不是 hatsune_miku_(vocaloid)」
+        self.assertIn("hatsune_miku", P)
+        self.assertIn("不是 hatsune_miku_(vocaloid)", P)
+        # P0-2：必须说明 `\n` 是字面的反斜杠 + 字母 n（而非真正换行）
+        self.assertIn("字面的反斜杠", P)
+        # 规则 12：多人场景人数标签
+        self.assertIn("2girls", P)
+        # 旧措辞（「忽略尺寸…」）不得残留
+        self.assertNotIn("忽略尺寸", P)
+
+    async def test_translate_timeout_note_shows_fractional_seconds(self):
+        """B2：timeout < 1 时文案应显示小数，而不是「超时 0s」。"""
+        self.provider.delay = 0.6  # 必须大于 timeout，才会真正触发超时
+        t = self.PromptTranslator(self.context, _make_translator_cfg(translate_timeout=0.5))
+        res = await t.translate("原神 雷电将军")
+        self.assertFalse(res.translated)
+        self.assertIn("0.5", res.note)
+        self.assertNotIn("超时 0s", res.note)
+
 
 class TestTranslateWebUI(unittest.IsolatedAsyncioTestCase):
     """v0.3.0：直译 WebUI 后端接口与生图链路集成。"""

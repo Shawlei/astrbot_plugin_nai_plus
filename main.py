@@ -44,7 +44,7 @@ from .core.translate_client import (
 PLUGIN_NAME = "astrbot_plugin_nai_plus"
 
 # 版本号回退常量（正常情况下从 metadata.yaml 读取，见 _read_plugin_version）
-_PLUGIN_VERSION_FALLBACK = "0.3.1"
+_PLUGIN_VERSION_FALLBACK = "0.3.2"
 
 # 匹配「唤醒前缀 + nai 指令名」的头部，用于从原始消息还原完整参数、以及展示真实前缀。
 # prefix 允许最多 3 个非字母数字且非空白字符（如 '#'、'/'、'！' 等）。

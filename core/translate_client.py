@@ -37,14 +37,19 @@ DEFAULT_TRANSLATE_SYSTEM_PROMPT = (
     "1. 只输出英文标签，用英文逗号分隔；不要任何解释、标题、编号、引号、代码块或多余句子。\n"
     "2. 用标签短语，不要整句：写 long hair，不要写 she has long hair。\n"
     "3. 输入里本来就有的英文标签要原样保留，不要改写、重排或增删。\n"
-    "4. 原样保留 NovelAI 权重语法，绝不修改：`1.2::tag::`、`{{tag}}`、`[tag]`、`-2::tag::`、`\\n20::tag::`。\n"
+    "4. 原样保留 NovelAI 权重语法，绝不修改：`1.2::tag::`、`{{tag}}`、`[tag]`、`-2::tag::`、`\\n20::tag::`；"
+    "其中 `\\n20::` 里的 `\\n` 是字面的反斜杠 + 字母 n，不要输出真正的换行符。\n"
     "5. 原样保留画师标签，例如 `artist:name`。\n"
     "6. 尽量保持原有顺序。\n"
     "\n"
     "角色名与作品名（最重要）：\n"
-    "7. 用户提到某个已知游戏 / 动漫 / 漫画 / 插画作品里的角色时，输出精确的 Danbooru 角色标签，"
-    "格式为 `角色名_(作品名)`，全部小写、空格用下划线。示例：原神 雷电将军 -> raiden_shogun_(genshin_impact)；"
-    "崩坏3 琪亚娜 -> kiana_kaslana_(honkai_impact_3rd)；鸣潮 达妮娅 -> dania_(wuthering_waves)。\n"
+    "7. 用户提到某个已知游戏 / 动漫 / 漫画 / 插画作品里的角色时，输出该角色在 Danbooru 上的标准标签，"
+    "全部小写、空格用下划线。\n"
+    "   - 如果该标签在 Danbooru 上是带括号消歧的，写成 `角色名_(作品名)`。例如：原神 雷电将军 -> "
+    "raiden_shogun_(genshin_impact)；战双 比安卡 -> bianca_(punishing:_gray_raven)；鸣潮 达妮娅 -> "
+    "dania_(wuthering_waves)。\n"
+    "   - 如果该标签本身不带括号，就直接用它，不要画蛇添足加括号。例如：初音未来 -> hatsune_miku"
+    "（不是 hatsune_miku_(vocaloid)）。\n"
     "8. 单独出现的作品名 / 系列名，翻译成它的通用英文标签（例如 原神 -> genshin_impact，"
     "崩坏3 -> honkai_impact_3rd）。\n"
     "9. 如果不知道某角色的准确消歧写法：该角色只输出「小写 + 下划线」的罗马字名字作为标签，"
@@ -53,12 +58,14 @@ DEFAULT_TRANSLATE_SYSTEM_PROMPT = (
     "10. 不确定角色属于哪个作品时，宁可不加括号，也绝不编造作品名。\n"
     "11. 除非用户明确说了，否则绝不编造细节：不要凭空添加发色、瞳色、发型、体型、服装、姿势或表情。"
     "这条规则优先级最高。\n"
-    "12. 用户只描述一个人时，必须在最前面加 `1girl`（或 `1boy`）；性别未知用 `solo`。"
-    "只有用户明确要求多个人、或场景里没有人物时才省略。\n"
-    "13. 不要输出两个意思相同的标签，只保留最准确的一个：泳装 -> swimsuit（不要 swimsuit + bikini）；"
-    "女孩 -> 1girl（不要 1girl + female）。\n"
-    "14. 把中文量词翻译成标签：双马尾 -> twintails；两把刀 -> holding two swords。\n"
-    "15. 忽略尺寸、分辨率等与画面无关的指令。\n"
+    "12. 人数标签：只有能确定「画面里有且仅有一个人物」时，才加 `1girl`（或 `1boy`），性别未知用 `solo`；"
+    "不确定就按规则 16 省略。若输入里已有 `1girl` / `1boy` / 人数标签，保持它原来的位置，不要挪动。"
+    "用户明确描述多个人时，按人数输出 `2girls` / `3girls` / `multiple girls`（能判断性别时）。\n"
+    "13. 只有两个标签在 Danbooru 里确实是同义 / 重复时，才合并成一个：泳装 -> `swimsuit`"
+    "（不要 `swimsuit` + `bikini`）；女孩 -> `1girl`（不要 `1girl` + `female`）。"
+    "不同强度或程度的标签不要合并（例如 `long hair` 与 `very long hair` 是两个不同标签，都要保留）。\n"
+    "14. 把中文量词翻译成标签：双马尾 -> twintails；两把刀 -> two swords。\n"
+    "15. 尺寸、分辨率这类与画面无关的词不要翻译；除它们以外，用户写的内容都要照常翻译，不要遗漏。\n"
     "16. 拿不准时就不要加标签。宁少勿滥：准确的标签少一点，远好过瞎猜一堆。\n"
     "\n"
     "示例：\n"
@@ -70,6 +77,9 @@ DEFAULT_TRANSLATE_SYSTEM_PROMPT = (
     "\n"
     "输入：战双 比安卡 泳装\n"
     "输出：1girl, bianca_(punishing:_gray_raven), swimsuit\n"
+    "\n"
+    "输入：初音未来 双马尾\n"
+    "输出：1girl, hatsune_miku, twintails\n"
     "\n"
     "输入：鸣潮 达妮娅 泳装\n"
     "输出：1girl, dania_(wuthering_waves), swimsuit\n"
@@ -201,11 +211,25 @@ def _clean_llm_output(text: str) -> str:
             result = result[len(prefix):].strip()
             lowered = result.lower()
 
-    # 4. 多行只保留像标签的行（含逗号者优先），取第一行
+    # 4. 多行：保留「所有像标签的行」并用 ", " 拼接。
+    #    为什么这样做（v0.3.2 踩坑）：模型偶尔无视「只输出一行」的要求，把标签分多行输出
+    #    （例如 "1girl, silver hair\nstanding, cherry_blossom"）。老实现只取第一行，
+    #    第二行会被**静默丢弃**，而且丢弃后仍能通过中文校验 —— 这是静默丢内容，违反项目铁律。
+    #    判定「像标签」：行非空、长度 ≤ 200、且不以句子结束标点（。！？.!?）结尾，
+    #    用来剔除模型末尾附带的解释性句子。
+    #    ⚠️ 结束标点集合**绝不能包含冒号**：`1.3::silver hair::`、`\n20::best quality::`
+    #       这类权重分组必须以 `::` 结尾，必须保留（有回归测试守着）。
     if "\n" in result:
         lines = [ln.strip() for ln in result.split("\n") if ln.strip()]
-        tagged = [ln for ln in lines if "," in ln]
-        result = tagged[0] if tagged else (lines[0] if lines else result)
+        tag_lines = [
+            ln for ln in lines
+            if len(ln) <= 200 and not ln.endswith(("。", "！", "？", ".", "!", "?"))
+        ]
+        if tag_lines:
+            # 全部保留并拼接，绝不因为「只想留一行」而丢掉后面真正的标签
+            result = ", ".join(tag_lines)
+        else:
+            result = lines[0] if lines else result
 
     # 5. 收敛空白、合并连续逗号（不拆分类单个逗号，避免破坏权重分组）
     result = re.sub(r"\s+", " ", result)
@@ -369,7 +393,7 @@ class PromptTranslator:
             return TranslateResult(
                 text=text,
                 translated=False,
-                note=f"直译失败（超时 {int(self.timeout)}s），本次用原文生图",
+                note=f"直译失败（超时 {self.timeout:g}s），本次用原文生图",
             )
         except TranslateError as e:
             return TranslateResult(
