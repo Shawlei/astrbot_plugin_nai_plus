@@ -52,7 +52,7 @@ git clone https://github.com/Shawlei/astrbot_plugin_nai_plus.git
 | `custom_presets` | 自定义预设列表（与 WebUI 面板双向同步） | `[]` |
 | `timeout` | 请求超时时间（秒） | `120` |
 | `translate_enabled` | 是否启用中文提示词直译（可在 WebUI 面板设置） | `false` |
-| `translate_provider_id` | 直译使用的对话模型 ID（只读调用，不改动你的对话模型设置） | 空 |
+| `translate_provider_id` | 直译使用的对话模型（在 AstrBot 原生配置页可直接**下拉选择**已配置的对话模型；只读调用，不改动你的对话模型设置） | 空 |
 | `translate_system_prompt` | 直译系统提示词（留空使用内置默认值，WebUI 可编辑/恢复默认） | 内置默认 |
 | `show_image_info` | 是否在图片下方显示耗时与预设 | `true` |
 | `llm_tool_enabled` | 是否允许 AI 助手调用生图 | `true` |
@@ -140,7 +140,7 @@ git clone https://github.com/Shawlei/astrbot_plugin_nai_plus.git
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
 | `translate_enabled` | 是否启用中文提示词直译 | `false` |
-| `translate_provider_id` | 直译使用的对话模型 ID（留空则直译不生效） | 空 |
+| `translate_provider_id` | 直译使用的对话模型（原生配置页可直接**下拉选择**已配置的模型；留空则直译不生效） | 空 |
 | `translate_system_prompt` | 直译系统提示词（**中文编写、便于直接修改**，留空使用内置默认值；要求输出角色在 Danbooru 上的标准标签——带括号消歧时才加括号，如 `hatsune_miku` 不加括号） | 内置默认 |
 
 ### 4. 余额查询

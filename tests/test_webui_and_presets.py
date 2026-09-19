@@ -910,6 +910,24 @@ class TestConfigAndSchemaIntegrity(unittest.TestCase):
         self.assertIn('id="preview-neg-val"', html)
         self.assertIn('id="preset-search"', html)
 
+    def test_translate_provider_id_uses_official_select_provider(self):
+        """v0.3.4：直译模型必须用 AstrBot 官方 `_special: select_provider`（单数）。
+
+        守卫点：
+        - 必须 == "select_provider"（原生配置页会渲染成模型下拉选择器）；
+        - 绝不能是复数 "select_providers"（官方文档标注为 Core 内部实现、不建议插件使用）；
+        - 该键仍为 string / 默认空串（select_provider 返回字符串，正好匹配）。
+        """
+        schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        key = schema["translate_provider_id"]
+        self.assertEqual(key.get("_special"), "select_provider")
+        self.assertNotEqual(key.get("_special"), "select_providers")
+        self.assertEqual(key["type"], "string")
+        self.assertEqual(key["default"], "")
+        # 另外两个直译配置项不应带 _special
+        self.assertNotIn("_special", schema["translate_enabled"])
+        self.assertNotIn("_special", schema["translate_system_prompt"])
+
 
 class _FakeMeta:
     """模拟 AstrBot provider 的 meta() 返回对象。"""

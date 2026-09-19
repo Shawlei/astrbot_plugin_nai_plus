@@ -1,5 +1,26 @@
 # 更新日志
 
+## v0.3.4 (2026-09-19)
+
+> 用户反馈「直译模型不能直接拉取 AstrBot 的模型吗？我要的不是填写，而是直接选择」。本版把该字段改成**下拉选择器**。
+
+- **修复直译模型必须手打 provider id 的问题**：
+  - **为什么**：`_conf_schema.json` 里 `translate_provider_id` 原先只声明了 `type: "string"`，
+    AstrBot **原生插件配置页**就把它渲染成了**普通文本输入框**，用户必须手打 provider id —— 这正是用户抱怨的点。
+    （插件自带的 WebUI 面板里本来就有 `<select>` 下拉，但用户显然在用原生配置页。）
+  - **修复**：加上 AstrBot 官方声明 `"_special": "select_provider"`，原生配置页会渲染成**模型下拉选择器**，可直接选择已配置的对话模型。
+- **⚠️ 用单数 `select_provider`，不用复数 `select_providers`**：
+  - 官方文档（`docs.astrbot.app/en/dev/star/guides/plugin-config.html`）把 `select_provider` 列为插件可用的公开值，
+    且它**返回字符串**（正好匹配我们的 `type: "string"`）；而复数 `select_providers` 被标注为 **AstrBot Core 内部实现、明确建议插件不要使用**。
+  - 旧版备份 `astrbot_plugin_nai_plus_backup_v1.6.2/_conf_schema.json` 用的正是复数写法，属踩在内部实现上，本次**没有照抄**。
+  - 已在测试中加回归守卫：断言该键 `_special == "select_provider"` 且 `!= "select_providers"`，防止被写回复数或误删。
+- **兼容性**：`_special` 需 AstrBot >= 4.0.0；本插件 metadata 已声明 `astrbot_version: ">=4.26.0,<5"`，无需改动。
+  老版本不识别 `_special` 时会忽略它、优雅降级为普通输入框，**未**编写兼容分支。
+- **代码无需改动**：选择器写入的就是 provider id 字符串，与现有 `context.get_provider_by_id(provider_id)` 使用同一套 id；
+  `PromptTranslator.reload()` 读到的仍是纯字符串（并已 `.strip()`），`list_models()` 返回的 id 亦为 `provider.provider_id`，两者一致。
+- 其它两个直译配置项（`translate_enabled` bool 开关、`translate_system_prompt` text 输入框）**不加** `_special`，保持原生控件。
+- `metadata.yaml` → `0.3.4`；`_PLUGIN_VERSION_FALLBACK` 同步；README 配置说明改为「可直接下拉选择已配置的对话模型」。
+
 ## v0.3.3 (2026-09-19)
 
 > 提示词最后一次打磨（之后除非真机测试暴露实际问题，不再改提示词）。**不改动任何直译逻辑**。
