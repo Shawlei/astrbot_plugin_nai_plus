@@ -36,11 +36,15 @@ from .core.preset_manager import (
     merge_tags,
     split_negative_weights,
 )
+from .core.translate_client import (
+    DEFAULT_TRANSLATE_SYSTEM_PROMPT,
+    PromptTranslator,
+)
 
 PLUGIN_NAME = "astrbot_plugin_nai_plus"
 
 # 版本号回退常量（正常情况下从 metadata.yaml 读取，见 _read_plugin_version）
-_PLUGIN_VERSION_FALLBACK = "0.2.2"
+_PLUGIN_VERSION_FALLBACK = "0.3.0"
 
 # 匹配「唤醒前缀 + nai 指令名」的头部，用于从原始消息还原完整参数、以及展示真实前缀。
 # prefix 允许最多 3 个非字母数字且非空白字符（如 '#'、'/'、'！' 等）。
@@ -250,6 +254,9 @@ class Nai2ApiPlugin(Star):
         self._llm_tool_enabled = bool(config.get("llm_tool_enabled", True))
         self._show_image_info = bool(config.get("show_image_info", True))
 
+        # v0.3.0 中文提示词直译器：独立于聊天主模型，只做读操作（绝不 set_using_provider）
+        self.translator = PromptTranslator(context, self._translate_cfg())
+
         self._fix_llm_tool_schemas()
         self._register_webui_apis()
         # 启动日志带版本号：用户排查问题时不用再「猜版本」
@@ -298,6 +305,53 @@ class Nai2ApiPlugin(Star):
         template_list = self.presets.export_template_list()
         await self._save_plugin_config({"custom_presets": template_list})
 
+    def _translate_cfg(self, patch: dict | None = None) -> dict:
+        """从当前配置提取直译相关配置（供 PromptTranslator 使用）。
+
+        patch 用于叠加「尚未落盘」的改动（如 WebUI 保存时）。
+        """
+        cfg = self.config
+
+        def _get(key: str, default):
+            try:
+                return cfg.get(key, default)
+            except Exception:
+                return default
+
+        out = {
+            "translate_enabled": _get("translate_enabled", False),
+            "translate_provider_id": _get("translate_provider_id", ""),
+            "translate_system_prompt": _get("translate_system_prompt", ""),
+            "translate_timeout": _get("translate_timeout", None),
+        }
+        if patch:
+            out.update(patch)
+        return out
+
+    async def _translate_prompt(self, prompt: str) -> tuple[str, str, str | None]:
+        """对用户提示词做中文直译，返回 (生效提示词, 信息标签, 失败说明)。
+
+        铁律：直译失败**绝不静默**——失败时回退原文，并通过 translate_note 明确告知原因。
+        成功时返回「 | 直译」信息标签用于图片信息行；未触发时标签为空串。
+        """
+        translator = getattr(self, "translator", None)
+        if translator is None:
+            return prompt, "", None
+        try:
+            result = await translator.translate(prompt)
+        except Exception as e:
+            # translate() 内部已兜底，这里再加一层保险：绝不让直译拖垮生图主链路
+            logger.error("[Nai2API] 直译调用异常: %s", e, exc_info=True)
+            return prompt, "", f"直译失败（{type(e).__name__}），本次用原文生图"
+
+        if result.translated:
+            logger.info("[Nai2API] 提示词直译成功: %r -> %r", prompt, result.text)
+            return result.text, " | 直译", None
+        if result.note:
+            logger.warning("[Nai2API] 提示词直译未生效: %s（输入 %r）", result.note, prompt)
+            return prompt, "", result.note
+        return prompt, "", None
+
     def _register_webui_apis(self) -> None:
         """注册 AstrBot 插件独立 WebUI 预设管理面板的后端 API。"""
         try:
@@ -345,6 +399,15 @@ class Nai2ApiPlugin(Star):
                     "presets": self.presets.export_for_webui(def_preset),
                     "default_artist": str(self.config.get("default_artist", "") or ""),
                     "default_negative": str(self.config.get("default_negative", "") or ""),
+                    "translate": {
+                        "enabled": bool(self.config.get("translate_enabled", False)),
+                        "provider_id": str(self.config.get("translate_provider_id", "") or ""),
+                        "system_prompt": (
+                            str(self.config.get("translate_system_prompt", "") or "")
+                            or DEFAULT_TRANSLATE_SYSTEM_PROMPT
+                        ),
+                    },
+                    "translate_default_prompt": DEFAULT_TRANSLATE_SYSTEM_PROMPT,
                     "version": _plugin_version(),
                 })
             except Exception as e:
@@ -447,11 +510,86 @@ class Nai2ApiPlugin(Star):
                 logger.error("[Nai WebUI] 预览失败: %s", e, exc_info=True)
                 return error_response(f"预览失败: {e}", status_code=500)
 
+        async def api_translate_models(*args, **kwargs):
+            """GET translate/models - 列出可用作直译的对话模型（只读）"""
+            try:
+                models = self.translator.list_models()
+                return json_response({
+                    "available": self.context is not None,
+                    "models": models,
+                })
+            except Exception as e:
+                logger.error("[Nai WebUI] 获取直译模型列表失败: %s", e, exc_info=True)
+                return json_response({"available": False, "models": [], "error": str(e)})
+
+        async def api_translate_save(*args, **kwargs):
+            """POST translate - 保存直译配置 {enabled, provider_id, system_prompt}"""
+            try:
+                payload = await _get_payload(*args)
+                enabled = bool(payload.get("enabled", False))
+                provider_id = str(payload.get("provider_id", "") or "").strip()
+                system_prompt = str(payload.get("system_prompt", "") or "").strip()
+                if not system_prompt:
+                    system_prompt = DEFAULT_TRANSLATE_SYSTEM_PROMPT
+
+                patch = {
+                    "translate_enabled": enabled,
+                    "translate_provider_id": provider_id,
+                    "translate_system_prompt": system_prompt,
+                }
+                await self._save_plugin_config(patch)
+                self.translator.reload(self._translate_cfg(patch))
+                return json_response({
+                    "ok": True,
+                    "saved": True,
+                    "translate": {
+                        "enabled": enabled,
+                        "provider_id": provider_id,
+                        "system_prompt": system_prompt,
+                    },
+                })
+            except Exception as e:
+                logger.error("[Nai WebUI] 保存直译配置失败: %s", e, exc_info=True)
+                return error_response(f"保存失败: {e}", status_code=500)
+
+        async def api_translate_test(*args, **kwargs):
+            """POST translate/test - 用表单未保存的值试译，不做任何持久化/内存改动"""
+            try:
+                payload = await _get_payload(*args)
+                text = str(payload.get("text", "") or "")
+                provider_id = str(payload.get("provider_id", "") or "").strip()
+                system_prompt = str(payload.get("system_prompt", "") or "").strip()
+                if not system_prompt:
+                    system_prompt = DEFAULT_TRANSLATE_SYSTEM_PROMPT
+
+                # 临时 translator：强制启用，绝不改动内存中的正式配置（无持久化）
+                temp_cfg = {
+                    "translate_enabled": True,
+                    "translate_provider_id": provider_id,
+                    "translate_system_prompt": system_prompt,
+                    "translate_timeout": self._translate_cfg().get("translate_timeout"),
+                }
+                temp = PromptTranslator(self.context, temp_cfg)
+                result = await temp.translate(text)
+                return json_response({
+                    "ok": True,
+                    "input": text,
+                    "translated": result.translated,
+                    "text": result.text,
+                    "note": result.note,
+                })
+            except Exception as e:
+                logger.error("[Nai WebUI] 试译失败: %s", e, exc_info=True)
+                return error_response(f"试译失败: {e}", status_code=500)
+
         endpoint_specs = [
             ("config", api_get_config, ["GET"], "NovelAI 面板：获取预设配置"),
             ("preset/default", api_set_default_preset, ["POST"], "NovelAI 面板：设置或取消默认预设"),
             ("presets", api_presets, ["POST"], "NovelAI 面板：预设增删改操作"),
             ("preview", api_preview, ["POST"], "NovelAI 面板：提示词与预设拼接预览"),
+            ("translate/models", api_translate_models, ["GET"], "NovelAI 面板：列出可用直译模型"),
+            ("translate", api_translate_save, ["POST"], "NovelAI 面板：保存直译配置"),
+            ("translate/test", api_translate_test, ["POST"], "NovelAI 面板：试译（不保存）"),
         ]
         registered_count = 0
         for endpoint, handler, methods, desc in endpoint_specs:
@@ -494,8 +632,14 @@ class Nai2ApiPlugin(Star):
         preset_name: str | None,
         elapsed: float,
         model: str | None = None,
+        translate_tag: str = "",
+        translate_note: str | None = None,
     ):
-        """发送图片+信息标签"""
+        """发送图片+信息标签。
+
+        translate_tag: 直译成功时附加的简短标签（如「 | 直译」），未触发为空串。
+        translate_note: 直译失败说明；非空时另起一行展示（铁律：失败绝不静默）。
+        """
         await event.send(event.image_result(str(image_path)))
         if self._show_image_info:
             model_tag = ""
@@ -506,7 +650,9 @@ class Nai2ApiPlugin(Star):
                     model_tag = f" | {model.replace('nai-diffusion-', '')}"
             elif is_v5_model(self.client.default_model):
                 model_tag = " | V5-Curated" if "curated" in self.client.default_model else " | V5"
-            info_text = f"{preset_name or '默认'}{model_tag} | 耗时{int(elapsed)}秒"
+            info_text = f"{preset_name or '默认'}{model_tag}{translate_tag or ''} | 耗时{int(elapsed)}秒"
+            if translate_note:
+                info_text += f"\n{translate_note}"
             await event.send(event.plain_result(info_text))
 
     async def _do_generate(
@@ -706,6 +852,10 @@ class Nai2ApiPlugin(Star):
         clean_artist, extracted_neg = split_negative_weights(final_artist or "")
         final_artist = clean_artist
 
+        # 1.5 中文提示词直译（v0.3.0）：用户提示词含中文时先经独立 LLM 直译为英文标签
+        #     直译失败会回退原文，并通过 translate_note 在图片信息下方说明原因（绝不静默）
+        prompt, translate_tag, translate_note = await self._translate_prompt(prompt)
+
         # 2. 解析正向提示词：预设正向词追加到用户提示词后
         final_prompt = merge_tags(prompt, preset_pos) if (effective_preset and preset_pos) else prompt
         final_prompt, _ = ensure_composition(final_prompt, final_artist or "")
@@ -723,7 +873,10 @@ class Nai2ApiPlugin(Star):
             )
             elapsed = time.time() - start
             display_preset = effective_preset or "默认"
-            await self._send_image_with_info(event, image_path, display_preset, elapsed, model=model)
+            await self._send_image_with_info(
+                event, image_path, display_preset, elapsed, model=model,
+                translate_tag=translate_tag, translate_note=translate_note,
+            )
             return None
         except Exception as e:
             logger.error("[Nai2API] 生图失败: %s", e)
@@ -732,6 +885,8 @@ class Nai2ApiPlugin(Star):
                 reason = str(e)[:100] if str(e) else "未知错误"
                 model_tag = f" | {model}" if model else ""
                 info_text = f"{effective_preset or '默认'}{model_tag} | 耗时{int(elapsed)}秒\n失败原因：{reason}"
+                if translate_note:
+                    info_text += f"\n{translate_note}"
                 return event.plain_result(info_text)
             return event.plain_result(f"生图失败: {e}")
 
@@ -1016,8 +1171,11 @@ class Nai2ApiPlugin(Star):
         clean_artist, extracted_neg = split_negative_weights(final_artist or "")
         final_artist = clean_artist
 
+        # v0.3.0 中文提示词直译：LLM 也可能传入中文提示词，同样走直译（失败回退原文）
+        translated_prompt, translate_tag, translate_note = await self._translate_prompt(prompt.strip())
+
         # 正向词
-        final_prompt = merge_tags(prompt.strip(), preset_pos) if (effective_preset and preset_pos) else prompt.strip()
+        final_prompt = merge_tags(translated_prompt, preset_pos) if (effective_preset and preset_pos) else translated_prompt
         final_prompt, _ = ensure_composition(final_prompt, final_artist or "")
 
         # 负向词
@@ -1047,12 +1205,18 @@ class Nai2ApiPlugin(Star):
             elapsed = time.time() - start
 
             display_preset = effective_preset or "默认"
-            await self._send_image_with_info(event, image_path, display_preset, elapsed, model=final_model)
+            await self._send_image_with_info(
+                event, image_path, display_preset, elapsed, model=final_model,
+                translate_tag=translate_tag, translate_note=translate_note,
+            )
 
+            result_text = f"图片已生成并发送给用户。提示词: {final_prompt[:100]}"
+            if translate_note:
+                result_text += f"\n（{translate_note}）"
             return mcp.types.CallToolResult(
                 content=[mcp.types.TextContent(
                     type="text",
-                    text=f"图片已生成并发送给用户。提示词: {final_prompt[:100]}"
+                    text=result_text
                 )]
             )
         except Exception as e:

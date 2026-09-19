@@ -51,6 +51,9 @@ git clone https://github.com/Shawlei/astrbot_plugin_nai_plus.git
 | `default_preset` | 默认画风预设名称（可在 WebUI 面板一键设置） | 空 |
 | `custom_presets` | 自定义预设列表（与 WebUI 面板双向同步） | `[]` |
 | `timeout` | 请求超时时间（秒） | `120` |
+| `translate_enabled` | 是否启用中文提示词直译（可在 WebUI 面板设置） | `false` |
+| `translate_provider_id` | 直译使用的对话模型 ID（只读调用，不改动你的对话模型设置） | 空 |
+| `translate_system_prompt` | 直译系统提示词（留空使用内置默认值，WebUI 可编辑/恢复默认） | 内置默认 |
 | `show_image_info` | 是否在图片下方显示耗时与预设 | `true` |
 | `llm_tool_enabled` | 是否允许 AI 助手调用生图 | `true` |
 
@@ -116,6 +119,29 @@ git clone https://github.com/Shawlei/astrbot_plugin_nai_plus.git
 /nai version                     # 查看插件版本、当前默认模型与默认预设
 /nai 版本                        # 中文别名，等效
 ```
+
+### 3.6 中文提示词直译
+
+开启后，**只要提示词含中文**，插件就会用一个**独立的对话模型**把中文直译成英文 Danbooru 标签再送出生图。例如：
+
+```text
+/nai 原神 雷电将军 泳装
+# 内部先直译为: 1girl, raiden_shogun_(genshin_impact), swimsuit，再送出生图
+```
+
+- **只读、不干扰**：直译只读取你已配置的对话模型（`get_all_providers` / `get_provider_by_id` / `text_chat`），
+  **绝不**修改你的对话主模型设置。
+- **纯英文不触发**：`/nai 1girl, silver hair` 这类纯英文 / 符号提示词会原样使用，**不会**调用任何 LLM。
+- **失败绝不静默**：直译失败（未配置模型、超时、模型返回异常、结果仍含中文等）时会**回退用原文生图**，
+  并在图片信息下方明确写出失败原因。
+- **配置方式**：进入 AstrBot 管理面板 → 插件 Pages「NovelAI 预设管理」→ 底部「提示词直译」卡片，
+  勾选启用、选择直译模型、编辑系统提示词，并可**测试直译**（使用当前未保存的设置试译，不写盘）。
+
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `translate_enabled` | 是否启用中文提示词直译 | `false` |
+| `translate_provider_id` | 直译使用的对话模型 ID（留空则直译不生效） | 空 |
+| `translate_system_prompt` | 直译系统提示词（留空使用内置默认值，强调作品名/角色名的 Danbooru 消歧标签） | 内置默认 |
 
 ### 4. 余额查询
 

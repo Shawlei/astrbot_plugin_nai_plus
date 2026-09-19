@@ -46,6 +46,18 @@
     previewTagVal: document.getElementById("preview-tag-val"),
     previewNegVal: document.getElementById("preview-neg-val"),
 
+    // 直译 (v0.3.0)
+    translateEnabled: document.getElementById("translate-enabled"),
+    translateProvider: document.getElementById("translate-provider"),
+    translateProviderHint: document.getElementById("translate-provider-hint"),
+    translatePrompt: document.getElementById("translate-prompt"),
+    translateSave: document.getElementById("translate-save"),
+    translateRestore: document.getElementById("translate-restore"),
+    translateRefreshModels: document.getElementById("translate-refresh-models"),
+    translateTestInput: document.getElementById("translate-test-input"),
+    translateTest: document.getElementById("translate-test"),
+    translateTestResult: document.getElementById("translate-test-result"),
+
     // 弹窗
     modal: document.getElementById("preset-modal"),
     modalTitle: document.getElementById("modal-title"),
@@ -123,6 +135,8 @@
       renderPresetList();
       renderPreviewSelect();
       updatePreview();
+      fillTranslateForm(data);
+      await loadTranslateModels();
     } catch (err) {
       console.error("加载配置失败:", err);
       el.statusChip.textContent = "读取失败";
@@ -264,6 +278,142 @@
       el.previewNegVal.textContent = res.negative || "（空）";
     } catch (err) {
       console.error("生成预览失败:", err);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 提示词直译 (v0.3.0)
+  // -------------------------------------------------------------------------
+
+  function fillTranslateForm(data) {
+    const t = (data && data.translate) || {};
+    state.translateProviderId = t.provider_id || "";
+    state.translateDefaultPrompt = (data && data.translate_default_prompt) || "";
+    el.translateEnabled.checked = !!t.enabled;
+    el.translatePrompt.value = t.system_prompt || state.translateDefaultPrompt;
+    // provider 下拉框在 loadTranslateModels 中根据 state.translateProviderId 回填
+  }
+
+  async function loadTranslateModels() {
+    if (!bridge || typeof bridge.apiGet !== "function") return;
+    const select = el.translateProvider;
+    const savedVal = state.translateProviderId || (select.value || "");
+    select.disabled = true;
+    select.innerHTML = `<option value="">加载中…</option>`;
+
+    try {
+      const data = await bridge.apiGet("translate/models");
+      const models = (data && data.models) || [];
+      const available = !data || data.available !== false;
+
+      if (!available) {
+        select.innerHTML = `<option value="">（当前 AstrBot 不支持读取模型）</option>`;
+        select.disabled = true;
+        el.translateProviderHint.textContent =
+          "无法读取 AstrBot 模型列表（需 AstrBot >= 4.26.0）。可手动保存后由后端解析。";
+        return;
+      }
+
+      let html = `<option value="">（不启用 / 未选择）</option>`;
+      models.forEach((m) => {
+        const label = m.name && m.name !== m.id ? `${m.name} (${m.type || "chat"})` : m.id;
+        html += `<option value="${escapeHtml(m.id)}">${escapeHtml(label)}</option>`;
+      });
+      // 已保存的模型已失效：补一个占位项，提醒用户重新选择
+      if (savedVal && !models.some((m) => m.id === savedVal)) {
+        html += `<option value="${escapeHtml(savedVal)}">（已失效）${escapeHtml(savedVal)}</option>`;
+      }
+      select.innerHTML = html;
+      select.disabled = false;
+
+      if (savedVal && Array.from(select.options).some((o) => o.value === savedVal)) {
+        select.value = savedVal;
+      }
+
+      el.translateProviderHint.textContent = models.length
+        ? `共 ${models.length} 个可用对话模型。只读取配置，绝不修改你的对话模型设置。`
+        : "未发现可用的对话模型，请先在 AstrBot 中配置对话模型。";
+    } catch (err) {
+      console.error("加载直译模型失败:", err);
+      select.innerHTML = `<option value="">（读取失败）</option>`;
+      select.disabled = true;
+      el.translateProviderHint.textContent = `读取模型列表失败: ${err.message || err}`;
+    }
+  }
+
+  async function saveTranslate() {
+    if (!bridge || !bridge.apiPost) return;
+    try {
+      el.translateSave.disabled = true;
+      const payload = {
+        enabled: el.translateEnabled.checked,
+        provider_id: el.translateProvider.value,
+        system_prompt: el.translatePrompt.value,
+      };
+      const res = await bridge.apiPost("translate", payload);
+      if (res && res.translate) {
+        state.translateProviderId = res.translate.provider_id || "";
+      }
+      showToast("直译设置已保存");
+    } catch (err) {
+      showToast(`保存直译设置失败: ${err.message || err}`, "error");
+    } finally {
+      el.translateSave.disabled = false;
+    }
+  }
+
+  function restoreDefaultTranslatePrompt() {
+    if (state.translateDefaultPrompt) {
+      el.translatePrompt.value = state.translateDefaultPrompt;
+      showToast("已恢复默认系统提示词（记得点「保存直译设置」）");
+    } else {
+      showToast("未获取到默认提示词", "warning");
+    }
+  }
+
+  async function testTranslate() {
+    if (!bridge || !bridge.apiPost) return;
+    const text = el.translateTestInput.value.trim();
+    if (!text) {
+      showToast("请输入要试译的中文提示词", "error");
+      return;
+    }
+
+    const btn = el.translateTest;
+    const box = el.translateTestResult;
+    const oldLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "翻译中…";
+    box.hidden = false;
+    box.className = "translate-test-result mono";
+    box.textContent = "请求直译模型中…";
+
+    try {
+      const res = await bridge.apiPost("translate/test", {
+        text,
+        provider_id: el.translateProvider.value,
+        system_prompt: el.translatePrompt.value,
+      });
+
+      if (res && res.error) {
+        box.className = "translate-test-result mono is-error";
+        box.textContent = `试译失败: ${res.error}`;
+      } else if (res && res.translated) {
+        box.className = "translate-test-result mono is-success";
+        box.textContent = res.text;
+      } else if (res && res.note) {
+        box.className = "translate-test-result mono is-warning";
+        box.textContent = res.note;
+      } else {
+        box.className = "translate-test-result mono";
+        box.textContent = "原文不含中文，无需直译（生图时将直接使用原文）。";
+      }
+    } catch (err) {
+      box.className = "translate-test-result mono is-error";
+      box.textContent = `试译失败: ${err.message || err}`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = oldLabel;
     }
   }
 
@@ -462,6 +612,12 @@
   // 预览更新
   el.previewPrompt.addEventListener("input", updatePreview);
   el.previewPresetSelect.addEventListener("change", updatePreview);
+
+  // 直译设置
+  el.translateSave.addEventListener("click", saveTranslate);
+  el.translateRestore.addEventListener("click", restoreDefaultTranslatePrompt);
+  el.translateRefreshModels.addEventListener("click", loadTranslateModels);
+  el.translateTest.addEventListener("click", testTranslate);
 
   // 初始化流程：先解析 bridge，等待 ready 并监听主题，再加载配置
   async function init() {

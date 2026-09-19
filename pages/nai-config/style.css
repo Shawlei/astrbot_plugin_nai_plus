@@ -626,6 +626,53 @@ textarea {
   font-size: 13px;
 }
 
+/* 提示词直译 (v0.3.0) */
+.translate-provider-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.translate-provider-row select {
+  flex: 1;
+  min-width: 0;
+}
+
+#translate-prompt {
+  min-height: 180px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.translate-test-result {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 12.5px;
+  min-height: 42px;
+  max-height: 220px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.translate-test-result.is-success {
+  border-color: var(--success);
+  background: var(--success-soft);
+}
+
+.translate-test-result.is-warning {
+  border-color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.translate-test-result.is-error {
+  border-color: var(--error);
+  background: var(--error-soft);
+}
+
 /* 弹窗 */
 .modal-overlay {
   position: fixed;

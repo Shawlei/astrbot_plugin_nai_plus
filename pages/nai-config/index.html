@@ -116,6 +116,62 @@
         </div>
       </div>
     </section>
+
+    <!-- 提示词直译卡片 (v0.3.0) -->
+    <section class="card" id="translate-card">
+      <div class="card-header">
+        <div>
+          <h2>提示词直译（中文 → 英文 Danbooru 标签）</h2>
+          <p class="hint">
+            开启后，当提示词包含中文时，自动调用你选择的<strong>独立对话模型</strong>直译为英文标签再送出生图；
+            纯英文 / 符号提示词会直接使用，<strong>不会</strong>调用任何模型。直译失败时会用原文生图，
+            并在图片信息下方说明原因。此功能<strong>只读取</strong>你已配置的对话模型，绝不会修改它。
+          </p>
+        </div>
+      </div>
+
+      <div class="form-check">
+        <label>
+          <input type="checkbox" id="translate-enabled" />
+          <span>启用中文提示词直译</span>
+        </label>
+      </div>
+
+      <div class="form-group">
+        <label for="translate-provider">直译使用的对话模型：</label>
+        <div class="translate-provider-row">
+          <select id="translate-provider">
+            <option value="">加载中…</option>
+          </select>
+          <button class="btn btn-outline btn-sm" id="translate-refresh-models" type="button">刷新模型</button>
+        </div>
+        <p class="field-hint" id="translate-provider-hint">
+          只读取 AstrBot 已配置的对话模型，绝不会修改你的对话模型设置。
+        </p>
+      </div>
+
+      <div class="form-group">
+        <label for="translate-prompt">直译系统提示词（System Prompt）：</label>
+        <textarea id="translate-prompt" class="mono" rows="10" spellcheck="false"></textarea>
+        <p class="field-hint">
+          决定直译风格与标签规范（尤其「作品名/角色名」如何落成 Danbooru 消歧标签）。留空保存时将自动恢复为默认内容。
+        </p>
+      </div>
+
+      <div class="toolbar">
+        <button class="btn btn-primary" id="translate-save" type="button">保存直译设置</button>
+        <button class="btn btn-outline" id="translate-restore" type="button">恢复默认提示词</button>
+      </div>
+
+      <div class="form-group">
+        <label for="translate-test-input">测试直译（使用当前未保存的设置，不写盘、不改内存）：</label>
+        <input type="text" id="translate-test-input" value="原神 雷电将军 泳装" placeholder="输入中文提示词试译…" />
+        <div class="toolbar">
+          <button class="btn btn-secondary" id="translate-test" type="button">测试直译</button>
+        </div>
+        <div class="translate-test-result mono" id="translate-test-result" hidden></div>
+      </div>
+    </section>
   </div>
 
   <!-- 预设编辑/新建弹窗 -->

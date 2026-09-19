@@ -911,5 +911,427 @@ class TestConfigAndSchemaIntegrity(unittest.TestCase):
         self.assertIn('id="preset-search"', html)
 
 
+class _FakeMeta:
+    """模拟 AstrBot provider 的 meta() 返回对象。"""
+
+    def __init__(self, id, name, ptype="chat"):
+        self.id = id
+        self.name = name
+        self.type = ptype
+
+
+class _FakeResp:
+    """模拟 provider.text_chat 的返回对象（completion_text 可能缺失）。"""
+
+    def __init__(self, completion_text=None):
+        if completion_text is not None:
+            self.completion_text = completion_text
+
+
+class FakeChatProvider:
+    """模拟 AstrBot 对话模型：记录调用参数，可配置返回/异常/延迟。"""
+
+    def __init__(
+        self,
+        provider_id="fake_llm",
+        name="Fake LLM",
+        ptype="chat",
+        response="1girl, swimsuit",
+        error=None,
+        delay=0.0,
+        use_result_attr=False,
+    ):
+        self.provider_id = provider_id
+        self._meta = _FakeMeta(provider_id, name, ptype)
+        self.response = response
+        self.error = error
+        self.delay = delay
+        self.use_result_attr = use_result_attr
+        self.calls = []
+
+    def meta(self):
+        return self._meta
+
+    async def text_chat(self, prompt=None, system_prompt=None, **kwargs):
+        self.calls.append({"prompt": prompt, "system_prompt": system_prompt})
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.error is not None:
+            raise self.error
+        if self.use_result_attr:
+            resp = _FakeResp()
+            resp.result = _FakeResp(completion_text=self.response)
+            return resp
+        return _FakeResp(completion_text=self.response)
+
+
+class _FakeContext:
+    """最小 Context 替身：只实现直译用到的只读接口。"""
+
+    def __init__(self, providers=None, fail=False):
+        self._providers = list(providers or [])
+        self._fail = fail
+
+    def get_all_providers(self):
+        if self._fail:
+            raise RuntimeError("boom")
+        return list(self._providers)
+
+    def get_provider_by_id(self, pid):
+        for p in self._providers:
+            if getattr(p, "provider_id", None) == pid:
+                return p
+        return None
+
+
+def _make_translator_cfg(**overrides):
+    cfg = {
+        "translate_enabled": True,
+        "translate_provider_id": "fake_llm",
+        "translate_system_prompt": "",
+        "translate_timeout": 30.0,
+    }
+    cfg.update(overrides)
+    return cfg
+
+
+class TestPromptTranslation(unittest.IsolatedAsyncioTestCase):
+    """v0.3.0：PromptTranslator 直译决策顺序、清洗、校验与失败回退。"""
+
+    def setUp(self):
+        from astrbot_plugin_nai_plus.core.translate_client import PromptTranslator
+
+        self.PromptTranslator = PromptTranslator
+        self.provider = FakeChatProvider()
+        self.context = _FakeContext([self.provider])
+
+    async def test_has_cjk_detection(self):
+        from astrbot_plugin_nai_plus.core.translate_client import has_cjk
+
+        self.assertTrue(has_cjk("原神 雷电将军"))
+        self.assertTrue(has_cjk("1girl, 泳装"))
+        self.assertTrue(has_cjk("桜"))
+        self.assertFalse(has_cjk("1girl, silver hair, blue eyes"))
+        self.assertFalse(has_cjk("{{1girl}}, 1.3::silver hair::"))
+        self.assertFalse(has_cjk(""))
+        self.assertFalse(has_cjk(None))
+
+    async def test_clean_llm_output(self):
+        from astrbot_plugin_nai_plus.core.translate_client import _clean_llm_output
+
+        self.assertEqual(_clean_llm_output("```text\n1girl, smile\n```"), "1girl, smile")
+        self.assertEqual(_clean_llm_output("Output: 1girl, smile"), "1girl, smile")
+        self.assertEqual(_clean_llm_output("输出： 1girl, smile"), "1girl, smile")
+        self.assertEqual(_clean_llm_output('"1girl, smile"'), "1girl, smile")
+        self.assertEqual(_clean_llm_output("1girl,, smile,,,"), "1girl, smile")
+        self.assertEqual(_clean_llm_output("  1girl,    smile  "), "1girl, smile")
+        # 内部含逗号的权重分组绝不能被破坏
+        self.assertEqual(_clean_llm_output("1.5::a, b::, 1girl"), "1.5::a, b::, 1girl")
+
+    async def test_translate_empty_passthrough(self):
+        t = self.PromptTranslator(self.context, _make_translator_cfg())
+        res = await t.translate("")
+        self.assertFalse(res.translated)
+        self.assertIsNone(res.note)
+        res2 = await t.translate("   ")
+        self.assertFalse(res2.translated)
+
+    async def test_translate_disabled_passthrough(self):
+        t = self.PromptTranslator(self.context, _make_translator_cfg(translate_enabled=False))
+        res = await t.translate("原神 雷电将军")
+        self.assertFalse(res.translated)
+        self.assertEqual(res.text, "原神 雷电将军")
+        self.assertEqual(self.provider.calls, [])
+
+    async def test_translate_pure_english_skips_llm(self):
+        t = self.PromptTranslator(self.context, _make_translator_cfg())
+        res = await t.translate("1girl, silver hair, looking at viewer")
+        self.assertFalse(res.translated)
+        self.assertEqual(res.text, "1girl, silver hair, looking at viewer")
+        self.assertEqual(self.provider.calls, [], "纯英文提示词绝不能调用 LLM")
+
+    async def test_translate_success_and_system_prompt(self):
+        self.provider.response = "1girl, raiden_shogun_(genshin_impact), swimsuit"
+        t = self.PromptTranslator(self.context, _make_translator_cfg())
+        res = await t.translate("原神 雷电将军 泳装")
+        self.assertTrue(res.translated)
+        self.assertIsNone(res.note)
+        self.assertEqual(res.text, "1girl, raiden_shogun_(genshin_impact), swimsuit")
+        # 必须带上系统提示词调用 text_chat
+        self.assertEqual(len(self.provider.calls), 1)
+        self.assertEqual(self.provider.calls[0]["prompt"], "原神 雷电将军 泳装")
+        self.assertEqual(self.provider.calls[0]["system_prompt"], t.system_prompt)
+
+    async def test_translate_provider_missing_note(self):
+        t = self.PromptTranslator(self.context, _make_translator_cfg(translate_provider_id=""))
+        res = await t.translate("原神 雷电将军")
+        self.assertFalse(res.translated)
+        self.assertEqual(res.text, "原神 雷电将军")
+        self.assertIn("未配置", res.note)
+        self.assertIn("原文", res.note)
+
+    async def test_translate_provider_not_found_note(self):
+        t = self.PromptTranslator(self.context, _make_translator_cfg(translate_provider_id="ghost"))
+        res = await t.translate("原神 雷电将军")
+        self.assertFalse(res.translated)
+        self.assertIsNotNone(res.note)
+
+    async def test_translate_llm_exception_note(self):
+        self.provider.error = RuntimeError("api down")
+        t = self.PromptTranslator(self.context, _make_translator_cfg())
+        res = await t.translate("原神 雷电将军")
+        self.assertFalse(res.translated)
+        self.assertEqual(res.text, "原神 雷电将军")
+        self.assertIn("直译失败", res.note)
+        self.assertIn("RuntimeError", res.note)
+        self.assertIn("原文", res.note)
+
+    async def test_translate_result_still_cjk_note(self):
+        self.provider.response = "1girl, 中文没翻干净"
+        t = self.PromptTranslator(self.context, _make_translator_cfg())
+        res = await t.translate("原神 雷电将军")
+        self.assertFalse(res.translated)
+        self.assertEqual(res.text, "原神 雷电将军")
+        self.assertIn("仍含中文", res.note)
+
+    async def test_translate_empty_result_note(self):
+        self.provider.response = " , , "
+        t = self.PromptTranslator(self.context, _make_translator_cfg())
+        res = await t.translate("原神 雷电将军")
+        self.assertFalse(res.translated)
+        self.assertIn("返回为空", res.note)
+
+    async def test_translate_too_long_note(self):
+        self.provider.response = "a" * 2000
+        t = self.PromptTranslator(self.context, _make_translator_cfg())
+        res = await t.translate("原神")
+        self.assertFalse(res.translated)
+        self.assertIn("异常过长", res.note)
+
+    async def test_translate_timeout_note(self):
+        self.provider.delay = 0.3
+        t = self.PromptTranslator(self.context, _make_translator_cfg(translate_timeout=0.02))
+        res = await t.translate("原神 雷电将军")
+        self.assertFalse(res.translated)
+        self.assertEqual(res.text, "原神 雷电将军")
+        self.assertIn("超时", res.note)
+        self.assertIn("原文", res.note)
+
+    async def test_translate_completion_fallback_via_result_attr(self):
+        self.provider.response = "1girl, smile"
+        self.provider.use_result_attr = True
+        t = self.PromptTranslator(self.context, _make_translator_cfg())
+        res = await t.translate("少女微笑")
+        self.assertTrue(res.translated)
+        self.assertEqual(res.text, "1girl, smile")
+
+    async def test_list_models_filters_non_chat(self):
+        chat = FakeChatProvider(provider_id="llm1", name="主对话", ptype="chat")
+        tts = FakeChatProvider(provider_id="tts1", name="语音", ptype="text_to_speech")
+        emb = FakeChatProvider(provider_id="emb1", name="向量", ptype="embedding")
+        t = self.PromptTranslator(_FakeContext([chat, tts, emb]), _make_translator_cfg())
+        models = t.list_models()
+        ids = [m["id"] for m in models]
+        self.assertEqual(ids, ["llm1"])
+        self.assertEqual(models[0]["name"], "主对话")
+        self.assertEqual(models[0]["type"], "chat")
+
+    async def test_list_models_context_none(self):
+        t = self.PromptTranslator(None, _make_translator_cfg())
+        self.assertEqual(t.list_models(), [])
+
+    async def test_list_models_error_returns_empty(self):
+        t = self.PromptTranslator(_FakeContext(fail=True), _make_translator_cfg())
+        self.assertEqual(t.list_models(), [])
+
+    async def test_default_prompt_matches_schema(self):
+        from astrbot_plugin_nai_plus.core.translate_client import DEFAULT_TRANSLATE_SYSTEM_PROMPT
+
+        schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        self.assertIn("translate_system_prompt", schema)
+        self.assertEqual(
+            schema["translate_system_prompt"]["default"],
+            DEFAULT_TRANSLATE_SYSTEM_PROMPT,
+            "schema 默认提示词必须与 DEFAULT_TRANSLATE_SYSTEM_PROMPT 逐字节一致",
+        )
+        self.assertIn("translate_enabled", schema)
+        self.assertIn("translate_provider_id", schema)
+
+
+class TestTranslateWebUI(unittest.IsolatedAsyncioTestCase):
+    """v0.3.0：直译 WebUI 后端接口与生图链路集成。"""
+
+    def setUp(self):
+        mock_web_routes.clear()
+        from astrbot_plugin_nai_plus.main import Nai2ApiPlugin
+
+        self.provider = FakeChatProvider(provider_id="fake_llm", name="Fake LLM")
+        mock_context = MagicMock()
+        mock_context.register_web_api = mock_register_web_api
+        mock_context.get_all_providers = lambda: [self.provider]
+        mock_context.get_provider_by_id = (
+            lambda pid: self.provider if pid == self.provider.provider_id else None
+        )
+        self.mock_context = mock_context
+
+        self.data_dir = PLUGIN_ROOT / "tests" / "tmp_data_translate"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        mock_astrbot.api.star.StarTools.get_data_dir.return_value = self.data_dir
+
+        self.config = {
+            "token": "dummy",
+            "default_model": "nai-diffusion-4-5-full",
+            "default_preset": "",
+            "translate_enabled": False,
+            "translate_provider_id": "",
+            "translate_system_prompt": "",
+        }
+        self.plugin = Nai2ApiPlugin(mock_context, self.config)
+        self.plugin.client.generate = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n")
+        self.plugin.imgr.save_image = AsyncMock(return_value=Path("fake.png"))
+        self.plugin._send_image_with_info = AsyncMock()
+
+    def tearDown(self):
+        import shutil
+        if self.data_dir.exists():
+            shutil.rmtree(self.data_dir, ignore_errors=True)
+
+    async def test_translate_routes_registered(self):
+        for route in ("translate/models", "translate", "translate/test"):
+            self.assertIn(route, mock_web_routes, f"Route {route} not registered")
+
+    async def test_api_get_config_includes_translate(self):
+        from astrbot_plugin_nai_plus.core.translate_client import DEFAULT_TRANSLATE_SYSTEM_PROMPT
+
+        handler, methods = mock_web_routes["config"]
+        self.assertIn("GET", methods)
+        data = await handler(MagicMock())
+        self.assertIn("translate", data)
+        self.assertFalse(data["translate"]["enabled"])
+        self.assertEqual(data["translate"]["provider_id"], "")
+        self.assertEqual(data["translate"]["system_prompt"], DEFAULT_TRANSLATE_SYSTEM_PROMPT)
+        self.assertEqual(data["translate_default_prompt"], DEFAULT_TRANSLATE_SYSTEM_PROMPT)
+
+    async def test_api_translate_models_endpoint(self):
+        handler, methods = mock_web_routes["translate/models"]
+        self.assertIn("GET", methods)
+        data = await handler(MagicMock())
+        self.assertTrue(data["available"])
+        ids = [m["id"] for m in data["models"]]
+        self.assertIn("fake_llm", ids)
+
+    async def test_api_translate_save_and_reload(self):
+        handler, methods = mock_web_routes["translate"]
+        self.assertIn("POST", methods)
+        req = MagicMock()
+        req.json = AsyncMock(return_value={
+            "enabled": True,
+            "provider_id": "fake_llm",
+            "system_prompt": "",  # 留空 -> 回退默认
+        })
+        data = await handler(req)
+        self.assertTrue(data.get("ok"))
+        # 内存中的 translator 已热更新
+        self.assertTrue(self.plugin.translator.enabled)
+        self.assertEqual(self.plugin.translator.provider_id, "fake_llm")
+        from astrbot_plugin_nai_plus.core.translate_client import DEFAULT_TRANSLATE_SYSTEM_PROMPT
+        self.assertEqual(self.plugin.translator.system_prompt, DEFAULT_TRANSLATE_SYSTEM_PROMPT)
+        # 配置已写回
+        self.assertTrue(self.plugin.config.get("translate_enabled"))
+
+    async def test_api_translate_test_does_not_mutate_memory(self):
+        handler, _ = mock_web_routes["translate/test"]
+        req = MagicMock()
+        req.json = AsyncMock(return_value={
+            "text": "原神 雷电将军",
+            "provider_id": "fake_llm",
+            "system_prompt": "custom system prompt",
+        })
+        self.provider.response = "1girl, raiden_shogun_(genshin_impact)"
+        data = await handler(req)
+        self.assertTrue(data.get("ok"))
+        self.assertTrue(data["translated"])
+        self.assertEqual(data["text"], "1girl, raiden_shogun_(genshin_impact)")
+        # 试译不得改动内存中的正式配置
+        self.assertFalse(self.plugin.translator.enabled)
+        self.assertEqual(self.plugin.translator.provider_id, "")
+        self.assertFalse(bool(self.plugin.config.get("translate_enabled")))
+
+    async def test_api_translate_test_uses_unsaved_system_prompt(self):
+        handler, _ = mock_web_routes["translate/test"]
+        req = MagicMock()
+        req.json = AsyncMock(return_value={
+            "text": "少女微笑",
+            "provider_id": "fake_llm",
+            "system_prompt": "MY UNSAVED PROMPT",
+        })
+        await handler(req)
+        self.assertEqual(len(self.provider.calls), 1)
+        self.assertEqual(self.provider.calls[0]["system_prompt"], "MY UNSAVED PROMPT")
+
+    async def test_api_translate_test_passthrough_note(self):
+        handler, _ = mock_web_routes["translate/test"]
+        req = MagicMock()
+        req.json = AsyncMock(return_value={
+            "text": "原神 雷电将军",
+            "provider_id": "",  # 未选择模型 -> 失败但回退原文
+            "system_prompt": "",
+        })
+        data = await handler(req)
+        self.assertTrue(data.get("ok"))
+        self.assertFalse(data["translated"])
+        self.assertEqual(data["text"], "原神 雷电将军")
+        self.assertIn("原文", data["note"])
+
+    async def test_generate_translates_cjk_prompt(self):
+        # 直接开启翻译（等价于用户已在面板保存启用）
+        self.plugin.translator.enabled = True
+        self.plugin.translator.provider_id = "fake_llm"
+        self.provider.response = "1girl, raiden_shogun_(genshin_impact), swimsuit"
+
+        event = MagicMock()
+        event.plain_result = lambda text: text
+        event.message_str = "#nai 原神 雷电将军 泳装"
+        event.get_message_str = lambda: "#nai 原神 雷电将军 泳装"
+
+        await self.plugin._handle_generate(event, "原神 雷电将军 泳装")
+        self.assertEqual(self.plugin.client.generate.await_count, 1)
+        sent_prompt = self.plugin.client.generate.await_args.args[0]
+        self.assertIn("raiden_shogun", sent_prompt)
+        self.assertNotIn("原神", sent_prompt)
+
+    async def test_generate_english_skips_translation(self):
+        self.plugin.translator.enabled = True
+        self.plugin.translator.provider_id = "fake_llm"
+
+        event = MagicMock()
+        event.plain_result = lambda text: text
+        event.message_str = "#nai 1girl, silver hair"
+        event.get_message_str = lambda: "#nai 1girl, silver hair"
+
+        await self.plugin._handle_generate(event, "1girl, silver hair")
+        self.assertEqual(self.provider.calls, [], "英文提示词不应触发直译")
+        sent_prompt = self.plugin.client.generate.await_args.args[0]
+        self.assertIn("silver hair", sent_prompt)
+
+    async def test_generate_translation_failure_falls_back_to_original(self):
+        self.plugin.translator.enabled = True
+        self.plugin.translator.provider_id = "fake_llm"
+        self.provider.error = RuntimeError("boom")
+
+        event = MagicMock()
+        event.plain_result = lambda text: text
+        event.message_str = "#nai 少女微笑"
+        event.get_message_str = lambda: "#nai 少女微笑"
+
+        await self.plugin._handle_generate(event, "少女微笑")
+        self.assertEqual(self.plugin.client.generate.await_count, 1)
+        sent_prompt = self.plugin.client.generate.await_args.args[0]
+        self.assertIn("少女微笑", sent_prompt)
+        # 失败说明应通过 _send_image_with_info 的 translate_note 传出（绝不静默）
+        kwargs = self.plugin._send_image_with_info.await_args.kwargs
+        self.assertIn("直译失败", kwargs.get("translate_note") or "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

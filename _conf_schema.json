@@ -32,7 +32,17 @@
     "description": "默认图片尺寸",
     "hint": "普通=1点，2K=15点，4K=25点",
     "type": "string",
-    "options": ["竖图", "横图", "方图", "2K竖图", "2K横图", "2K方图", "4K竖图", "4K横图", "4K方图"],
+    "options": [
+      "竖图",
+      "横图",
+      "方图",
+      "2K竖图",
+      "2K横图",
+      "2K方图",
+      "4K竖图",
+      "4K横图",
+      "4K方图"
+    ],
     "default": "竖图"
   },
   "default_steps": {
@@ -71,7 +81,17 @@
   "default_sampler": {
     "description": "默认采样器",
     "type": "string",
-    "options": ["k_dpmpp_2m_sde", "k_dpmpp_sde", "k_dpmpp_2m", "k_dpmpp_2s_ancestral", "k_euler", "k_euler_ancestral", "k_dpm_fast", "k_dpm_adaptive", "ddim"],
+    "options": [
+      "k_dpmpp_2m_sde",
+      "k_dpmpp_sde",
+      "k_dpmpp_2m",
+      "k_dpmpp_2s_ancestral",
+      "k_euler",
+      "k_euler_ancestral",
+      "k_dpm_fast",
+      "k_dpm_adaptive",
+      "ddim"
+    ],
     "default": "k_dpmpp_2m_sde"
   },
   "default_negative": {
@@ -129,7 +149,10 @@
   "default_noise_schedule": {
     "description": "默认噪声调度",
     "type": "string",
-    "options": ["karras", "native"],
+    "options": [
+      "karras",
+      "native"
+    ],
     "default": "karras"
   },
   "timeout": {
@@ -148,6 +171,24 @@
     "hint": "关闭后 LLM 无法调用 nai_generate 工具",
     "type": "bool",
     "default": true
+  },
+  "translate_enabled": {
+    "description": "启用中文提示词直译",
+    "hint": "开启后，提示词含中文时自动用下方选择的独立对话模型直译为英文 Danbooru 标签；纯英文/符号提示词直接使用，不调用模型。",
+    "type": "bool",
+    "default": false
+  },
+  "translate_provider_id": {
+    "description": "直译使用的对话模型",
+    "hint": "填写 AstrBot 对话模型（provider）的 ID；留空则直译不生效。可在插件 WebUI 面板「提示词直译」中可视化选择。该功能只读取、绝不修改你的对话模型设置。",
+    "type": "string",
+    "default": ""
+  },
+  "translate_system_prompt": {
+    "description": "直译系统提示词",
+    "hint": "决定直译风格与标签规范（尤其作品名/角色名如何落成 Danbooru 消歧标签）。留空时使用内置默认值。",
+    "type": "text",
+    "default": "You are a prompt translator for NovelAI image generation.\nTranslate the user's Chinese (or mixed Chinese/English) description into English Danbooru-style tags.\n\nRules:\n1. Output ONLY the tags, separated by commas. No explanation, no markdown, no code fences, no quotes, no numbering, no extra sentences.\n2. Use tag keywords, not sentences: write 'long hair' not 'she has long hair'.\n3. If part of the input is already English tags, keep them VERBATIM; do not rewrite or reorder them.\n4. PRESERVE any NovelAI weight syntax exactly as-is, never modify or renumber it: `1.2::tag::`, `{{tag}}`, `[tag]`, `-2::tag::`, `\\n20::tag::`.\n5. Preserve artist tags such as `artist:name` unchanged.\n6. Keep the original order as much as possible.\n\nCharacter and work names (MOST IMPORTANT):\n7. When the user names a character from a known game / anime / manga / illustration work, output the precise Danbooru character tag in the form `character_name_(franchise_name)`, all lowercase with underscores. Examples: 原神 雷电将军 -> raiden_shogun_(genshin_impact); 崩坏3 琪亚娜 -> kiana_kaslana_(honkai_impact_3rd); 鸣潮 达妮娅 -> dania_(wuthering_waves).\n8. Translate a work / franchise name on its own into its common English tag (e.g. 原神 -> genshin_impact, 崩坏3 -> honkai_impact_3rd).\n9. If you do NOT know the exact Danbooru disambiguation for a character, output the romanized character name as a tag and STOP. NEVER guess how the character looks.\n10. NEVER invent details the user did not mention: no hair color, eye color, hairstyle, body type, clothing, pose, or expression unless the user explicitly said it. This rule overrides everything else.\n11. SUBJECT COUNT IS MANDATORY when a single person is described: put `1girl` (or `1boy`) as the FIRST tag; use `solo` if the gender is unknown. Omit it only when the user clearly asks for multiple people or a scene with no people.\n12. Do NOT output two tags with the same meaning. Pick the single most accurate one: 泳装 -> swimsuit (not swimsuit + bikini); 女孩 -> 1girl (not 1girl + female).\n13. Convert Chinese counters/quantifiers into tags: 双马尾 -> twintails; 两把刀 -> holding two swords.\n14. Ignore non-visual instructions such as requested size or resolution.\n15. When in doubt, do NOT add a tag. Too few accurate tags beats extra guessed tags.\n\nExamples:\nInput: 白发少女站在樱花树下，回头微笑\nOutput: 1girl, white hair, standing, cherry blossoms, tree, looking back, smile\n\nInput: 原神 雷电将军 紫色长发 和服\nOutput: 1girl, raiden_shogun_(genshin_impact), purple hair, long hair, japanese clothes\n\nInput: 战双 比安卡 泳装\nOutput: 1girl, bianca_(punishing:_gray_raven), swimsuit\n\nInput: 鸣潮 达妮娅 泳装\nOutput: 1girl, dania_(wuthering_waves), swimsuit\n\nInput: {{1girl}} 1.3::silver hair:: [detailed]\nOutput: {{1girl}}, 1.3::silver hair::, [detailed]\n\nInput: 1girl, silver hair, looking at viewer\nOutput: 1girl, silver hair, looking at viewer\n\nInput: 赛博朋克风格的城市夜景，霓虹灯，雨，氛围感\nOutput: cyberpunk, city, night, neon lights, rain, cinematic lighting, depth of field\n\nOutput the translated tags in a single line and nothing else."
   },
   "show_image_info": {
     "description": "图片信息标签",
