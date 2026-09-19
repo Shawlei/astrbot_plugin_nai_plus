@@ -1192,7 +1192,7 @@ class TestPromptTranslation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_clean_llm_output("1girl, silver hair, smile"), "1girl, silver hair, smile")
 
     async def test_default_prompt_content_guards(self):
-        """提示词内容守卫：P0-1/P0-2 与规则 12 的关键表述必须在，旧措辞必须不在。"""
+        """提示词内容守卫：P0-1/P0-2、规则 12/13/14 的关键表述必须在，旧/非规范措辞必须不在。"""
         from astrbot_plugin_nai_plus.core.translate_client import DEFAULT_TRANSLATE_SYSTEM_PROMPT as P
 
         # P0-1：必须给出「不带括号」的角色示例 hatsune_miku，并明确「不是 hatsune_miku_(vocaloid)」
@@ -1200,8 +1200,16 @@ class TestPromptTranslation(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不是 hatsune_miku_(vocaloid)", P)
         # P0-2：必须说明 `\n` 是字面的反斜杠 + 字母 n（而非真正换行）
         self.assertIn("字面的反斜杠", P)
-        # 规则 12：多人场景人数标签
+        # 规则 14（v0.3.3）：量词示例改为 Danbooru 规范标签 twintails / 2girls
+        self.assertIn("twintails", P)
+        self.assertIn("两名少女", P)
         self.assertIn("2girls", P)
+        # F2：非规范标签 `two swords` 必须已被移除
+        self.assertNotIn("two swords", P)
+        # F1（v0.3.3）：规则 13 必须限定为「翻译产生的标签」，避免与规则 3「原样保留」冲突
+        self.assertIn("对你翻译产生的标签", P)
+        # F3（v0.3.3）：新添加的人数标签位置必须写清楚
+        self.assertIn("新添加的人数标签放在最前面", P)
         # 旧措辞（「忽略尺寸…」）不得残留
         self.assertNotIn("忽略尺寸", P)
 
