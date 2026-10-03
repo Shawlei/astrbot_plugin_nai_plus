@@ -1,5 +1,22 @@
 # 更新日志
 
+## v0.3.5 (2026-10-03)
+
+> 修复保存插件配置时 AstrBot 报「格式校验未通过: ['未知模板 custom_presets[0]: preset', …]」的问题。
+
+- **为什么**：`_conf_schema.json` 里 `custom_presets` 用的是单数 `"template"`，
+  而 AstrBot 官方 `template_list` 校验器（`astrbot/dashboard/services/config_service.py` 的
+  `_validate_template_list()`）读的是**复数 `"templates"`**。于是校验器拿到 `templates = {}`，
+  每个预设项的 `__template_key="preset"` 都查不到 → 每项报一条「未知模板 custom_presets[i]: preset」，
+  用户保存配置直接失败。
+- **修复**：把 `custom_presets` 改成官方格式——`"template"` → `"templates"`，并把字段整体套进 `"items"`；
+  模板增加 `"name"`（下拉显示名）、`"hint"`、`"display_item": "name"`（列表折叠时显示预设名）。
+- **代码无需改动**：`core/preset_manager.py` 的 `export_template_list()` 已正确输出 `__template_key: "preset"`，
+  `parse_webui_presets()` 读 `item.get("name"/"artist"/"positive"/"negative"/"desc")` 与新结构兼容。
+- 测试新增回归守卫：断言 `custom_presets` 含 `templates`、**不含**单数 `template`、`display_item == "name"`，
+  且每个字段都套在 `items` 里并带 `type`，防止将来又被写回单数。
+- `metadata.yaml` → `0.3.5`；`_PLUGIN_VERSION_FALLBACK` 同步。
+
 ## v0.3.4 (2026-09-19)
 
 > 用户反馈「直译模型不能直接拉取 AstrBot 的模型吗？我要的不是填写，而是直接选择」。本版把该字段改成**下拉选择器**。

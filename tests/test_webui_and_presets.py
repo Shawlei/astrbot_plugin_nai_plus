@@ -868,12 +868,14 @@ class TestConfigAndSchemaIntegrity(unittest.TestCase):
         self.assertIn("default_preset", schema)
         self.assertIn("custom_presets", schema)
         self.assertEqual(schema["custom_presets"]["type"], "template_list")
-        template = schema["custom_presets"]["template"]["preset"]
-        self.assertIn("name", template)
-        self.assertIn("artist", template)
-        self.assertIn("positive", template)
-        self.assertIn("negative", template)
-        self.assertIn("desc", template)
+        self.assertIn("templates", schema["custom_presets"])
+        self.assertNotIn("template", schema["custom_presets"])
+        preset_tmpl = schema["custom_presets"]["templates"]["preset"]
+        self.assertEqual(preset_tmpl["display_item"], "name")
+        items = preset_tmpl["items"]
+        for field in ("name", "artist", "positive", "negative", "desc"):
+            self.assertIn(field, items)
+            self.assertIn("type", items[field])
 
         # default_model V5 options verification
         self.assertIn("default_model", schema)

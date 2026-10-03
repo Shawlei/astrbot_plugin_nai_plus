@@ -116,32 +116,37 @@
     "description": "自定义预设列表",
     "type": "template_list",
     "default": [],
-    "template": {
+    "templates": {
       "preset": {
-        "name": {
-          "description": "预设名称",
-          "type": "string",
-          "default": ""
-        },
-        "artist": {
-          "description": "质量词/画师串",
-          "type": "text",
-          "default": ""
-        },
-        "positive": {
-          "description": "附带正向词",
-          "type": "text",
-          "default": ""
-        },
-        "negative": {
-          "description": "附带负向词",
-          "type": "text",
-          "default": ""
-        },
-        "desc": {
-          "description": "描述备注",
-          "type": "string",
-          "default": ""
+        "name": "自定义预设",
+        "hint": "画风预设三段式：质量词/画师串 + 正向词 + 负向词",
+        "display_item": "name",
+        "items": {
+          "name": {
+            "description": "预设名称",
+            "type": "string",
+            "default": ""
+          },
+          "artist": {
+            "description": "质量词/画师串",
+            "type": "text",
+            "default": ""
+          },
+          "positive": {
+            "description": "附带正向词",
+            "type": "text",
+            "default": ""
+          },
+          "negative": {
+            "description": "附带负向词",
+            "type": "text",
+            "default": ""
+          },
+          "desc": {
+            "description": "描述备注",
+            "type": "string",
+            "default": ""
+          }
         }
       }
     }
